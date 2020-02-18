@@ -27,6 +27,7 @@
 #ifdef UAE
 
 void uae_ppc_get_model(const TCHAR **model, uint32_t *hid1);
+
 void uae_ppc_doze(void);
 void uae_ppc_crash(void);
 void uae_ppc_cpu_reboot(void);
@@ -38,10 +39,11 @@ bool uae_ppc_cpu_unlock(void);
 void uae_ppc_emulate(void);
 void uae_ppc_reset(bool hardreset);
 void uae_ppc_free(void);
-void uae_ppc_hsync_handler(void);
 void uae_ppc_wakeup(void);
 void ppc_map_banks(uae_u32, uae_u32, const TCHAR*, void*, bool);
+void ppc_remap_bank(uae_u32 start, uae_u32 size, const TCHAR *name, void *addr);
 bool uae_self_is_ppc(void);
+void uae_ppc_wakeup_main(void);
 
 void uae_ppc_execute_quick(void);
 void uae_ppc_execute_check(void);
@@ -94,7 +96,7 @@ typedef struct PPCMemoryRegion {
     uint32_t start;
     uint32_t size;
     void *memory;
-    const char *name;
+    char *name;
     uint32_t alias;
 } PPCMemoryRegion;
 
@@ -120,6 +122,7 @@ void PPCCALL ppc_cpu_reset(void);
 //int PPCCALL ppc_cpu_get_state();
 bool PPCCALL ppc_cpu_check_state(int state);
 void PPCCALL ppc_cpu_set_state(int state);
+
 /* Other PPC defines */
 
 #define PPC_IMPLEMENTATION_AUTO 0

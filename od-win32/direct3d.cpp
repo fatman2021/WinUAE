@@ -31,9 +31,10 @@
 #include "hq2x_d3d.h"
 #include "zfile.h"
 #include "uae.h"
+#include "gui.h"
 #include "threaddep\thread.h"
 
-extern int D3DEX, d3ddebug;
+extern int D3DEX, shaderon, d3ddebug;
 int forcedframelatency = -1;
 
 #include <d3d9.h>
@@ -42,19 +43,50 @@ int forcedframelatency = -1;
 #include "direct3d.h"
 
 static TCHAR *D3DHEAD = _T("-");
-static int psEnabled, psActive, shaderon;
-static struct gfx_filterdata *filterd3d;
-static int filterd3didx;
 
 static bool showoverlay = true;
+static int slicecnt;
+static int clearcnt;
+static bool debugcolors;
+static bool noclear;
+static bool cannoclear;
+
+int fakemodewaitms;
+
+static int leds[LED_MAX];
+
+static const TCHAR *overlayleds[] = {
+	_T("power"),
+	_T("df0"),
+	_T("df1"),
+	_T("df2"),
+	_T("df3"),
+	_T("hd"),
+	_T("cd"),
+	_T("md"),
+	_T("net"),
+	NULL
+};
+static const int ledtypes[] = {
+	LED_POWER,
+	LED_DF0,
+	LED_DF1,
+	LED_DF2,
+	LED_DF3,
+	LED_HD,
+	LED_CD,
+	LED_MD,
+	LED_NET
+}; 
 
 #define MAX_PASSES 2
 
 #define SHADERTYPE_BEFORE 1
 #define SHADERTYPE_AFTER 2
 #define SHADERTYPE_MIDDLE 3
-#define SHADERTYPE_MASK_BEFORE 3
-#define SHADERTYPE_MASK_AFTER 4
+#define SHADERTYPE_MASK_BEFORE 4
+#define SHADERTYPE_MASK_AFTER 5
+#define SHADERTYPE_MASK_MIDDLE 6
 #define SHADERTYPE_POST 10
 
 struct shaderdata
@@ -63,6 +95,8 @@ struct shaderdata
 	int psPreProcess;
 	int worktex_width;
 	int worktex_height;
+	int targettex_width;
+	int targettex_height;
 	LPDIRECT3DTEXTURE9 lpWorkTexture1;
 	LPDIRECT3DTEXTURE9 lpWorkTexture2;
 	LPDIRECT3DTEXTURE9 lpTempTexture;
@@ -82,7 +116,9 @@ struct shaderdata
 	// Texture Handles
 	D3DXHANDLE m_SourceDimsEffectHandle;
 	D3DXHANDLE m_InputDimsEffectHandle;
+	D3DXHANDLE m_TargetDimsEffectHandle;
 	D3DXHANDLE m_TexelSizeEffectHandle;
+	D3DXHANDLE m_ScaleEffectHandle;
 	D3DXHANDLE m_SourceTextureEffectHandle;
 	D3DXHANDLE m_WorkingTexture1EffectHandle;
 	D3DXHANDLE m_WorkingTexture2EffectHandle;
@@ -93,65 +129,103 @@ struct shaderdata
 	// Stuff
 	D3DXHANDLE framecounterHandle;
 };
-static LPDIRECT3DTEXTURE9 lpPostTempTexture;
+
+struct d3d9overlay
+{
+	struct d3d9overlay *next;
+	int id;
+	int x, y;
+	LPDIRECT3DTEXTURE9 tex;
+};
 
 #define MAX_SHADERS (2 * MAX_FILTERSHADERS + 2)
 #define SHADER_POST 0
-static struct shaderdata shaders[MAX_SHADERS];
 
-static D3DFORMAT tformat;
-static int d3d_enabled, d3d_ex;
-static IDirect3D9 *d3d;
-static IDirect3D9Ex *d3dex;
-static IDirect3DSwapChain9 *d3dswapchain;
-static D3DPRESENT_PARAMETERS dpp;
-static D3DDISPLAYMODEEX modeex;
-static IDirect3DDevice9 *d3ddev;
-static IDirect3DDevice9Ex *d3ddevex;
-static D3DSURFACE_DESC dsdbb;
-static LPDIRECT3DTEXTURE9 texture, sltexture, ledtexture, mask2texture, blanktexture;
-static IDirect3DQuery9 *query;
-static float mask2texture_w, mask2texture_h, mask2texture_ww, mask2texture_wh;
-static float mask2texture_wwx, mask2texture_hhx, mask2texture_minusx, mask2texture_minusy;
-static float mask2texture_multx, mask2texture_multy, mask2texture_offsetw;
-LPDIRECT3DTEXTURE9 cursorsurfaced3d;
-static IDirect3DVertexBuffer9 *vertexBuffer;
-static ID3DXSprite *sprite;
-static HWND d3dhwnd;
-static int devicelost;
-static int locked, fulllocked;
-static int cursor_offset_x, cursor_offset_y, cursor_offset2_x, cursor_offset2_y;
-static float maskmult_x, maskmult_y;
-RECT mask2rect;
-static bool wasstilldrawing_broken;
-static bool renderdisabled;
-static HANDLE filenotificationhandle;
-static int frames_since_init;
+struct d3dstruct
+{
+	int psEnabled, psActive;
+	struct shaderdata shaders[MAX_SHADERS];
+	LPDIRECT3DTEXTURE9 lpPostTempTexture;
+	IDirect3DSurface9 *screenshotsurface;
+	D3DFORMAT tformat;
+	int d3d_enabled, d3d_ex;
+	IDirect3D9 *d3d;
+	IDirect3D9Ex *d3dex;
+	IDirect3DSwapChain9 *d3dswapchain;
+	D3DPRESENT_PARAMETERS dpp;
+	D3DDISPLAYMODEEX modeex;
+	IDirect3DDevice9 *d3ddev;
+	IDirect3DDevice9Ex *d3ddevex;
+	D3DSURFACE_DESC dsdbb;
+	LPDIRECT3DTEXTURE9 texture, sltexture, ledtexture, blanktexture;
+	LPDIRECT3DTEXTURE9 mask2texture, mask2textureleds[9], mask2textureled_power_dim;
+	int mask2textureledoffsets[9 * 2];
+	IDirect3DQuery9 *query;
+	float mask2texture_w, mask2texture_h, mask2texture_ww, mask2texture_wh;
+	float mask2texture_wwx, mask2texture_hhx, mask2texture_minusx, mask2texture_minusy;
+	float mask2texture_multx, mask2texture_multy, mask2texture_offsetw;
+	LPDIRECT3DTEXTURE9 cursorsurfaced3d;
+	struct d3d9overlay *extoverlays;
+	IDirect3DVertexBuffer9 *vertexBuffer;
+	ID3DXSprite *sprite;
+	HWND d3dhwnd;
+	int devicelost;
+	int locked, fulllocked;
+	int cursor_offset_x, cursor_offset_y, cursor_offset2_x, cursor_offset2_y;
+	float maskmult_x, maskmult_y;
+	RECT mask2rect;
+	bool wasstilldrawing_broken;
+	bool renderdisabled;
+	HANDLE filenotificationhandle;
+	int frames_since_init;
 
-static volatile bool fakemode;
-static uae_u8 *fakebitmap;
-static uae_thread_id fakemodetid;
-int fakemodewaitms = 0;
+	volatile bool fakemode;
+	uae_u8 *fakebitmap;
+	uae_thread_id fakemodetid;
 
-static D3DXMATRIXA16 m_matProj, m_matProj2, m_matProj_out;
-static D3DXMATRIXA16 m_matWorld, m_matWorld2, m_matWorld_out;
-static D3DXMATRIXA16 m_matView, m_matView2, m_matView_out;
-static D3DXMATRIXA16 m_matPreProj;
-static D3DXMATRIXA16 m_matPreView;
-static D3DXMATRIXA16 m_matPreWorld;
-static D3DXMATRIXA16 postproj;
-static D3DXVECTOR4 maskmult, maskshift;
-static D3DXVECTOR4 fakesize;
+	D3DXMATRIXA16 m_matProj, m_matProj2, m_matProj_out;
+	D3DXMATRIXA16 m_matWorld, m_matWorld2, m_matWorld_out;
+	D3DXMATRIXA16 m_matView, m_matView2, m_matView_out;
+	D3DXMATRIXA16 m_matPreProj;
+	D3DXMATRIXA16 m_matPreView;
+	D3DXMATRIXA16 m_matPreWorld;
+	D3DXMATRIXA16 postproj;
+	D3DXVECTOR4 maskmult, maskshift;
+	D3DXVECTOR4 fakesize;
 
-static int ledwidth, ledheight;
-static int max_texture_w, max_texture_h;
-static int tin_w, tin_h, tout_w, tout_h, window_h, window_w;
-static int t_depth, dmult, dmultx;
-static int required_sl_texture_w, required_sl_texture_h;
-static int vsync2, guimode, maxscanline;
-static int resetcount;
-static double cursor_x, cursor_y;
-static bool cursor_v, cursor_scale;
+	int ledwidth, ledheight;
+	int max_texture_w, max_texture_h;
+	int tin_w, tin_h, tout_w, tout_h, window_h, window_w;
+	int t_depth, dmult, dmultxh, dmultxv;
+	int required_sl_texture_w, required_sl_texture_h;
+	int vsync2, guimode, maxscanline, variablerefresh;
+	int resetcount;
+	double cursor_x, cursor_y;
+	bool cursor_v, cursor_scale;
+	int statusbar_vx, statusbar_hx;
+
+	struct gfx_filterdata *filterd3d;
+	int filterd3didx;
+	int scanline_osl1, scanline_osl2, scanline_osl3, scanline_osl4;
+
+	D3DXHANDLE postSourceTextureHandle;
+	D3DXHANDLE postMaskTextureHandle;
+	D3DXHANDLE postTechnique, postTechniquePlain, postTechniqueAlpha;
+	D3DXHANDLE postMatrixSource;
+	D3DXHANDLE postMaskMult, postMaskShift;
+	D3DXHANDLE postFilterMode;
+	D3DXHANDLE postTexelSize;
+	D3DXHANDLE postFramecounterHandle;
+
+	float m_scale;
+	LPCSTR m_strName;
+
+	int ddraw_fs;
+	int ddraw_fs_attempt;
+	LPDIRECTDRAW7 ddraw;
+};
+
+static struct d3dstruct d3ddata[MAX_AMIGAMONITORS];
 
 #define NUMVERTICES 8
 #define D3DFVF_TLVERTEX D3DFVF_XYZ|D3DFVF_DIFFUSE|D3DFVF_TEX1
@@ -161,65 +235,61 @@ struct TLVERTEX {
 	D3DXVECTOR2 texcoord;       // texture coords
 };
 
-static int ddraw_fs;
-static int ddraw_fs_attempt;
-static LPDIRECTDRAW7 ddraw;
 
-static void ddraw_fs_hack_free (void)
+static void ddraw_fs_hack_free (struct d3dstruct *d3d)
 {
 	HRESULT hr;
 
-	if (!ddraw_fs)
+	if (!d3d->ddraw_fs)
 		return;
-	if (ddraw_fs == 2)
-		ddraw->RestoreDisplayMode ();
-	hr = ddraw->SetCooperativeLevel (d3dhwnd, DDSCL_NORMAL);
+	if (d3d->ddraw_fs == 2)
+		d3d->ddraw->RestoreDisplayMode ();
+	hr = d3d->ddraw->SetCooperativeLevel (d3d->d3dhwnd, DDSCL_NORMAL);
 	if (FAILED (hr)) {
 		write_log (_T("IDirectDraw7_SetCooperativeLevel CLEAR: %s\n"), DXError (hr));
 	}
-	ddraw->Release ();
-	ddraw = NULL;
-	ddraw_fs = 0;
-
+	d3d->ddraw->Release ();
+	d3d->ddraw = NULL;
+	d3d->ddraw_fs = 0;
 }
 
-static int ddraw_fs_hack_init (void)
+static int ddraw_fs_hack_init (struct d3dstruct *d3d)
 {
 	HRESULT hr;
 	struct MultiDisplay *md;
 
-	ddraw_fs_hack_free ();
-	DirectDraw_get_GUIDs ();
-	md = getdisplay (&currprefs);
+	ddraw_fs_hack_free(d3d);
+	DirectDraw_get_GUIDs();
+	md = getdisplay(&currprefs, 0);
 	if (!md)
 		return 0;
-	hr = DirectDrawCreateEx (md->primary ? NULL : &md->ddguid, (LPVOID*)&ddraw, IID_IDirectDraw7, NULL);
+	hr = DirectDrawCreateEx(md->primary ? NULL : &md->ddguid, (LPVOID*)&d3d->ddraw, IID_IDirectDraw7, NULL);
 	if (FAILED (hr)) {
 		write_log (_T("DirectDrawCreateEx failed, %s\n"), DXError (hr));
 		return 0;
 	}
-	ddraw_fs = 1;
-	hr = ddraw->SetCooperativeLevel (d3dhwnd, DDSCL_ALLOWREBOOT | DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+	d3d->ddraw_fs = 1;
+	hr = d3d->ddraw->SetCooperativeLevel(d3d->d3dhwnd, DDSCL_ALLOWREBOOT | DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
 	if (FAILED (hr)) {
 		write_log (_T("IDirectDraw7_SetCooperativeLevel SET: %s\n"), DXError (hr));
-		ddraw_fs_hack_free ();
+		ddraw_fs_hack_free (d3d);
 		return 0;
 	}
-	hr = ddraw->SetDisplayMode (dpp.BackBufferWidth, dpp.BackBufferHeight, t_depth, dpp.FullScreen_RefreshRateInHz, 0);
+	hr = d3d->ddraw->SetDisplayMode(d3d->dpp.BackBufferWidth, d3d->dpp.BackBufferHeight, d3d->t_depth, d3d->dpp.FullScreen_RefreshRateInHz, 0);
 	if (FAILED (hr)) {
 		write_log (_T("1:IDirectDraw7_SetDisplayMode: %s\n"), DXError (hr));
-		if (dpp.FullScreen_RefreshRateInHz && isvsync_chipset () < 0) {
-			hr = ddraw->SetDisplayMode (dpp.BackBufferWidth, dpp.BackBufferHeight, t_depth, 0, 0);
+		if (d3d->dpp.FullScreen_RefreshRateInHz && isvsync_chipset () < 0) {
+			hr = d3d->ddraw->SetDisplayMode(d3d->dpp.BackBufferWidth, d3d->dpp.BackBufferHeight, d3d->t_depth, 0, 0);
 			if (FAILED (hr))
 				write_log (_T("2:IDirectDraw7_SetDisplayMode: %s\n"), DXError (hr));
 		}
 		if (FAILED (hr)) {
 			write_log (_T("IDirectDraw7_SetDisplayMode: %s\n"), DXError (hr));
-			ddraw_fs_hack_free ();
+			ddraw_fs_hack_free(d3d);
 			return 0;
 		}
 	}
-	ddraw_fs = 2;
+	d3d->ddraw_fs = 2;
 	return 1;
 }
 
@@ -293,70 +363,59 @@ static TCHAR *D3DX_ErrorString (HRESULT hr, LPD3DXBUFFER Errors)
 	return buffer;
 }
 
-static int isd3d (void)
+static int isd3d (struct d3dstruct *d3d)
 {
-	if (fakemode || devicelost || !d3ddev || !d3d_enabled || renderdisabled)
+	if (d3d->fakemode || d3d->devicelost || !d3d->d3ddev || !d3d->d3d_enabled || d3d->renderdisabled)
 		return 0;
 	return 1;
 }
-static void waitfakemode (void)
+static void waitfakemode (struct d3dstruct *d3d)
 {
-	while (fakemode) {
+	while (d3d->fakemode) {
 		sleep_millis (10);
 	}
 }
 
-static D3DXHANDLE postSourceTextureHandle;
-static D3DXHANDLE postMaskTextureHandle;
-static D3DXHANDLE postTechnique, postTechniquePlain, postTechniqueAlpha;
-static D3DXHANDLE postMatrixSource;
-static D3DXHANDLE postMaskMult, postMaskShift;
-static D3DXHANDLE postFilterMode;
-static D3DXHANDLE postTexelSize;
-static D3DXHANDLE postFramecounterHandle;
-
-static float m_scale;
-static LPCSTR m_strName;
 
 enum psEffect_Pass { psEffect_None, psEffect_PreProcess1, psEffect_PreProcess2, psEffect_Combine };
 
-static int postEffect_ParseParameters (LPD3DXEFFECTCOMPILER EffectCompiler, LPD3DXEFFECT effect, struct shaderdata *s)
+static int postEffect_ParseParameters (struct d3dstruct *d3d, LPD3DXEFFECTCOMPILER EffectCompiler, LPD3DXEFFECT effect, struct shaderdata *s)
 {
-	postSourceTextureHandle = effect->GetParameterByName (NULL, "SourceTexture");
-	postMaskTextureHandle = effect->GetParameterByName (NULL, "OverlayTexture");
-	postTechnique = effect->GetTechniqueByName ("PostTechnique");
-	postTechniquePlain = effect->GetTechniqueByName ("PostTechniquePlain");
-	postTechniqueAlpha = effect->GetTechniqueByName ("PostTechniqueAlpha");
-	postMatrixSource = effect->GetParameterByName (NULL, "mtx");
-	postMaskMult = effect->GetParameterByName (NULL, "maskmult");
-	postMaskShift = effect->GetParameterByName (NULL, "maskshift");
-	postFilterMode = effect->GetParameterByName (NULL, "filtermode");
-	postTexelSize = effect->GetParameterByName (NULL, "texelsize");
-	postFramecounterHandle = effect->GetParameterByName (NULL, "framecounter");
+	d3d->postSourceTextureHandle = effect->GetParameterByName (NULL, "SourceTexture");
+	d3d->postMaskTextureHandle = effect->GetParameterByName (NULL, "OverlayTexture");
+	d3d->postTechnique = effect->GetTechniqueByName ("PostTechnique");
+	d3d->postTechniquePlain = effect->GetTechniqueByName ("PostTechniquePlain");
+	d3d->postTechniqueAlpha = effect->GetTechniqueByName ("PostTechniqueAlpha");
+	d3d->postMatrixSource = effect->GetParameterByName (NULL, "mtx");
+	d3d->postMaskMult = effect->GetParameterByName (NULL, "maskmult");
+	d3d->postMaskShift = effect->GetParameterByName (NULL, "maskshift");
+	d3d->postFilterMode = effect->GetParameterByName (NULL, "filtermode");
+	d3d->postTexelSize = effect->GetParameterByName (NULL, "texelsize");
+	d3d->postFramecounterHandle = effect->GetParameterByName (NULL, "framecounter");
 
-	if (!postMaskShift || !postMaskMult || !postFilterMode || !postMatrixSource || !postTexelSize) {
+	if (!d3d->postMaskShift || !d3d->postMaskMult || !d3d->postFilterMode || !d3d->postMatrixSource || !d3d->postTexelSize) {
 		gui_message (_T("Mismatched _winuae.fx! Exiting.."));
 		abort ();
 	}
 	return true;
 }
 
-static void postEffect_freeParameters(void)
+static void postEffect_freeParameters(struct d3dstruct *d3d)
 {
-	postSourceTextureHandle = NULL;
-	postMaskTextureHandle = NULL;
-	postTechnique = NULL;
-	postTechniquePlain = NULL;
-	postTechniqueAlpha = NULL;
-	postMatrixSource = NULL;
-	postMaskMult = NULL;
-	postMaskShift = NULL;
-	postFilterMode = NULL;
-	postTexelSize = NULL;
-	postFramecounterHandle = NULL;
+	d3d->postSourceTextureHandle = NULL;
+	d3d->postMaskTextureHandle = NULL;
+	d3d->postTechnique = NULL;
+	d3d->postTechniquePlain = NULL;
+	d3d->postTechniqueAlpha = NULL;
+	d3d->postMatrixSource = NULL;
+	d3d->postMaskMult = NULL;
+	d3d->postMaskShift = NULL;
+	d3d->postFilterMode = NULL;
+	d3d->postTexelSize = NULL;
+	d3d->postFramecounterHandle = NULL;
 }
 
-static int psEffect_ParseParameters (LPD3DXEFFECTCOMPILER EffectCompiler, LPD3DXEFFECT effect, D3DXEFFECT_DESC EffectDesc, struct shaderdata *s)
+static int psEffect_ParseParameters (struct d3dstruct *d3d, LPD3DXEFFECTCOMPILER EffectCompiler, LPD3DXEFFECT effect, D3DXEFFECT_DESC EffectDesc, struct shaderdata *s)
 {
 	HRESULT hr = S_OK;
 	// Look at parameters for semantics and annotations that we know how to interpret
@@ -408,11 +467,15 @@ static int psEffect_ParseParameters (LPD3DXEFFECTCOMPILER EffectCompiler, LPD3DX
 					s->m_SourceDimsEffectHandle = hParam;
 				if (strcmpi(ParamDesc.Semantic, "inputdims") == 0)
 					s->m_InputDimsEffectHandle = hParam;
+				if (strcmpi(ParamDesc.Semantic, "targetdims") == 0)
+					s->m_TargetDimsEffectHandle = hParam;
 				else if (strcmpi(ParamDesc.Semantic, "texelsize") == 0)
 					s->m_TexelSizeEffectHandle = hParam;
+				else if (strcmpi(ParamDesc.Semantic, "sourcescale") == 0)
+					s->m_ScaleEffectHandle = hParam;
 			} else if(ParamDesc.Class == D3DXPC_SCALAR && ParamDesc.Type == D3DXPT_FLOAT) {
 				if(strcmpi(ParamDesc.Semantic, "SCALING") == 0)
-					hr = effect->GetFloat(hParam, &m_scale);
+					hr = effect->GetFloat(hParam, &d3d->m_scale);
 			} else if(ParamDesc.Class == D3DXPC_OBJECT && ParamDesc.Type == D3DXPT_TEXTURE) {
 				if(strcmpi(ParamDesc.Semantic, "SOURCETEXTURE") == 0)
 					s->m_SourceTextureEffectHandle = hParam;
@@ -434,7 +497,7 @@ static int psEffect_ParseParameters (LPD3DXEFFECTCOMPILER EffectCompiler, LPD3DX
 					hr = effect->GetString(hParam, &pstrTechnique);
 					s->m_PreprocessTechnique2EffectHandle = effect->GetTechniqueByName(pstrTechnique);
 				} else if(strcmpi(ParamDesc.Semantic, "NAME") == 0) {
-					hr = effect->GetString(hParam, &m_strName);
+					hr = effect->GetString(hParam, &d3d->m_strName);
 				}
 			}
 			if (FAILED (hr)) {
@@ -498,7 +561,7 @@ static int psEffect_ParseParameters (LPD3DXEFFECTCOMPILER EffectCompiler, LPD3DX
 					if(pstrTextureType != NULL) {
 						if(strcmpi(pstrTextureType, "volume") == 0) {
 							LPDIRECT3DVOLUMETEXTURE9 pVolumeTex = NULL;
-							if(SUCCEEDED(hr = D3DXCreateVolumeTexture(d3ddev,
+							if(SUCCEEDED(hr = D3DXCreateVolumeTexture(d3d->d3ddev,
 								Width, Height, Depth, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &pVolumeTex))) {
 									if(SUCCEEDED(hr = D3DXFillVolumeTextureTX(pVolumeTex, ppTextureShader))) {
 										pTex = pVolumeTex;
@@ -506,7 +569,7 @@ static int psEffect_ParseParameters (LPD3DXEFFECTCOMPILER EffectCompiler, LPD3DX
 							}
 						} else if(strcmpi(pstrTextureType, "cube") == 0) {
 							LPDIRECT3DCUBETEXTURE9 pCubeTex = NULL;
-							if(SUCCEEDED(hr = D3DXCreateCubeTexture(d3ddev,
+							if(SUCCEEDED(hr = D3DXCreateCubeTexture(d3d->d3ddev,
 								Width, D3DX_DEFAULT, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &pCubeTex))) {
 									if(SUCCEEDED(hr = D3DXFillCubeTextureTX(pCubeTex, ppTextureShader))) {
 										pTex = pCubeTex;
@@ -515,7 +578,7 @@ static int psEffect_ParseParameters (LPD3DXEFFECTCOMPILER EffectCompiler, LPD3DX
 						}
 					} else {
 						LPDIRECT3DTEXTURE9 p2DTex = NULL;
-						if(SUCCEEDED(hr = D3DXCreateTexture(d3ddev, Width, Height,
+						if(SUCCEEDED(hr = D3DXCreateTexture(d3d->d3ddev, Width, Height,
 							D3DX_DEFAULT, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &p2DTex))) {
 								if(SUCCEEDED(hr = D3DXFillTextureTX(p2DTex, ppTextureShader))) {
 									pTex = p2DTex;
@@ -537,13 +600,18 @@ static int psEffect_ParseParameters (LPD3DXEFFECTCOMPILER EffectCompiler, LPD3DX
 			}
 		}
 	}
+
+	if (!s->m_CombineTechniqueEffectHandle && EffectDesc.Techniques > 0) {
+		s->m_CombineTechniqueEffectHandle = effect->GetTechnique(0);
+	}
+
 	return 1;
 }
 
 static int psEffect_hasPreProcess (struct shaderdata *s) { return s->m_PreprocessTechnique1EffectHandle != 0; }
 static int psEffect_hasPreProcess2 (struct shaderdata *s) { return s->m_PreprocessTechnique2EffectHandle != 0; }
 
-int D3D_goodenough (void)
+int xD3D_goodenough (void)
 {
 	static int d3d_good;
 	LPDIRECT3D9 d3dx;
@@ -562,7 +630,8 @@ int D3D_goodenough (void)
 					d3d_good = 1;
 					if (d3dCaps.PixelShaderVersion >= D3DPS_VERSION(1, 0)) {
 						d3d_good = 2;
-						shaderon = 1;
+						if (shaderon < 0)
+							shaderon = 1;
 					}
 				}
 			}
@@ -572,10 +641,12 @@ int D3D_goodenough (void)
 #if SHADER == 0
 	shaderon = 0;
 #endif
+	if (shaderon < 0)
+		shaderon = 0;
 	return d3d_good > 0 ? d3d_good : 0;
 }
 
-int D3D_canshaders (void)
+int xD3D_canshaders (void)
 {
 	static int d3d_yesno = 0;
 	HMODULE h;
@@ -816,7 +887,7 @@ static const char *fx20 = {
 "}\n"
 };	
 
-static bool psEffect_LoadEffect (const TCHAR *shaderfile, int full, struct shaderdata *s, int num)
+static bool psEffect_LoadEffect (struct d3dstruct *d3d, const TCHAR *shaderfile, int full, struct shaderdata *s, int num)
 {
 	int ret = 0;
 	LPD3DXEFFECTCOMPILER EffectCompiler = NULL;
@@ -826,7 +897,7 @@ static bool psEffect_LoadEffect (const TCHAR *shaderfile, int full, struct shade
 	TCHAR tmp[MAX_DPATH], tmp2[MAX_DPATH], tmp3[MAX_DPATH];
 	LPD3DXEFFECT effect = NULL;
 	static int first;
-	DWORD compileflags = psEnabled ? 0 : D3DXSHADER_USE_LEGACY_D3DX9_31_DLL;
+	DWORD compileflags = d3d->psEnabled ? 0 : D3DXSHADER_USE_LEGACY_D3DX9_31_DLL;
 	int canusefile = 0, existsfile = 0;
 	bool plugin_path;
 	D3DXEFFECT_DESC EffectDesc;
@@ -856,7 +927,7 @@ static bool psEffect_LoadEffect (const TCHAR *shaderfile, int full, struct shade
 				write_log (_T("%s: D3DXCreateEffectCompilerFromFile failed: %s\n"), D3DHEAD, D3DX_ErrorString (hr, Errors));
 		}
 		if (FAILED (hr)) {
-			const char *str = psEnabled ? fx20 : fx10;
+			const char *str = d3d->psEnabled ? fx20 : fx10;
 			int len = strlen (str);
 			if (!existsfile && plugin_path) {
 				struct zfile *z = zfile_fopen (tmp, _T("w"));
@@ -867,7 +938,7 @@ static bool psEffect_LoadEffect (const TCHAR *shaderfile, int full, struct shade
 			}
 			hr = D3DXCreateEffectCompiler (str, len, NULL, NULL, compileflags, &EffectCompiler, &Errors);
 			if (FAILED (hr)) {
-				write_log (_T("%s: D3DXCreateEffectCompilerFromResource failed: %s\n"), D3DHEAD, D3DX_ErrorString (hr, Errors));
+				write_log (_T("%s: D3DXCreateEffectCompiler failed: %s\n"), D3DHEAD, D3DX_ErrorString (hr, Errors));
 				goto end;
 			}
 		}
@@ -893,7 +964,7 @@ static bool psEffect_LoadEffect (const TCHAR *shaderfile, int full, struct shade
 	}
 	void *bp = BufferEffect->GetBufferPointer ();
 	int bplen = BufferEffect->GetBufferSize ();
-	hr = D3DXCreateEffect (d3ddev,
+	hr = D3DXCreateEffect (d3d->d3ddev,
 		bp, bplen,
 		NULL, NULL,
 		EFFECTCOMPILERFLAGS,
@@ -908,16 +979,16 @@ static bool psEffect_LoadEffect (const TCHAR *shaderfile, int full, struct shade
 		goto end;
 	}
 	if (full) {
-		if (!psEffect_ParseParameters (EffectCompiler, effect, EffectDesc, s))
+		if (!psEffect_ParseParameters (d3d, EffectCompiler, effect, EffectDesc, s))
 			goto end;
 	} else {
-		if (!postEffect_ParseParameters (EffectCompiler, effect, s))
+		if (!postEffect_ParseParameters (d3d, EffectCompiler, effect, s))
 			goto end;
 	}
 	ret = 1;
-	frames_since_init = 0;
-	if (plugin_path && filenotificationhandle == NULL)
-		filenotificationhandle = FindFirstChangeNotification (tmp3, FALSE, FILE_NOTIFY_CHANGE_LAST_WRITE);
+	d3d->frames_since_init = 0;
+	if (plugin_path && d3d->filenotificationhandle == NULL)
+		d3d->filenotificationhandle = FindFirstChangeNotification (tmp3, FALSE, FILE_NOTIFY_CHANGE_LAST_WRITE);
 
 end:
 	if (Errors)
@@ -930,7 +1001,7 @@ end:
 	if (full) {
 		s->psPreProcess = FALSE;
 		if (ret) {
-			psActive = TRUE;
+			d3d->psActive = TRUE;
 			if (psEffect_hasPreProcess (s))
 				s->psPreProcess = TRUE;
 		}
@@ -1057,7 +1128,19 @@ static int psEffect_SetTextures (LPDIRECT3DTEXTURE9 lpSource, struct shaderdata 
 	if (s->m_InputDimsEffectHandle) {
 		hr = s->pEffect->SetVector(s->m_InputDimsEffectHandle, &fDims);
 		if (FAILED(hr)) {
-			write_log(_T("%s: SetTextures:SetVector:Source %s\n"), D3DHEAD, D3D_ErrorString(hr));
+			write_log(_T("%s: SetTextures:SetVector:Input %s\n"), D3DHEAD, D3D_ErrorString(hr));
+			return 0;
+		}
+	}
+	if (s->m_TargetDimsEffectHandle) {
+		D3DXVECTOR4 fDimsTarget;
+		fDimsTarget.x = s->targettex_width;
+		fDimsTarget.y = s->targettex_height;
+		fDimsTarget.z = 1;
+		fDimsTarget.w = 1;
+		hr = s->pEffect->SetVector(s->m_TargetDimsEffectHandle, &fDimsTarget);
+		if (FAILED(hr)) {
+			write_log(_T("%s: SetTextures:SetVector:Target %s\n"), D3DHEAD, D3D_ErrorString(hr));
 			return 0;
 		}
 	}
@@ -1065,6 +1148,17 @@ static int psEffect_SetTextures (LPDIRECT3DTEXTURE9 lpSource, struct shaderdata 
 		hr = s->pEffect->SetVector (s->m_TexelSizeEffectHandle, &fTexelSize);
 		if (FAILED (hr)) {
 			write_log (_T("%s: SetTextures:SetVector:Texel %s\n"), D3DHEAD, D3D_ErrorString (hr));
+			return 0;
+		}
+	}
+	if (s->m_ScaleEffectHandle) {
+		D3DXVECTOR4 fScale;
+		fScale.x = 1 << currprefs.gfx_resolution;
+		fScale.y = 1 << currprefs.gfx_vresolution;
+		fScale.w = fScale.z = 1;
+		hr = s->pEffect->SetVector(s->m_ScaleEffectHandle, &fScale);
+		if (FAILED(hr)) {
+			write_log(_T("%s: SetTextures:SetVector:Scale %s\n"), D3DHEAD, D3D_ErrorString(hr));
 			return 0;
 		}
 	}
@@ -1139,18 +1233,18 @@ static int psEffect_End (LPD3DXEFFECT effect)
 	return 1;
 }
 
-static LPDIRECT3DTEXTURE9 createtext (int w, int h, D3DFORMAT format)
+static LPDIRECT3DTEXTURE9 createtext (struct d3dstruct *d3d, int w, int h, D3DFORMAT format)
 {
 	LPDIRECT3DTEXTURE9 t;
 	D3DLOCKED_RECT locked;
 	HRESULT hr;
 
-	hr = d3ddev->CreateTexture (w, h, 1, D3DUSAGE_DYNAMIC, format, D3DPOOL_DEFAULT, &t, NULL);
+	hr = d3d->d3ddev->CreateTexture (w, h, 1, D3DUSAGE_DYNAMIC, format, D3DPOOL_DEFAULT, &t, NULL);
 	if (FAILED (hr))
 		write_log (_T("%s: CreateTexture() D3DUSAGE_DYNAMIC failed: %s (%d*%d %08x)\n"),
 			D3DHEAD, D3D_ErrorString (hr), w, h, format);
 	if (FAILED (hr)) {
-		hr = d3ddev->CreateTexture (w, h, 1, 0, format, D3DPOOL_DEFAULT, &t, NULL);
+		hr = d3d->d3ddev->CreateTexture (w, h, 1, 0, format, D3DPOOL_DEFAULT, &t, NULL);
 	}
 	if (FAILED (hr)) {
 		write_log (_T("%s: CreateTexture() failed: %s (%d*%d %08x)\n"),
@@ -1173,93 +1267,93 @@ static LPDIRECT3DTEXTURE9 createtext (int w, int h, D3DFORMAT format)
 	return t;
 }
 
-static int allocextratextures (struct shaderdata *s, int w, int h)
+static int allocextratextures (struct d3dstruct *d3d, struct shaderdata *s, int w, int h)
 {
 	HRESULT hr;
-	if (FAILED (hr = d3ddev->CreateTexture (w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &s->lpWorkTexture1, NULL))) {
-		write_log (_T("%s: Failed to create working texture1: %s:%d\n"), D3DHEAD, D3D_ErrorString (hr), s - &shaders[0]);
+	if (FAILED (hr = d3d->d3ddev->CreateTexture (w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &s->lpWorkTexture1, NULL))) {
+		write_log (_T("%s: Failed to create working texture1: %s:%d\n"), D3DHEAD, D3D_ErrorString (hr), s - &d3d->shaders[0]);
 		return 0;
 	}
-	if (FAILED (hr = d3ddev->CreateTexture (w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &s->lpWorkTexture2, NULL))) {
-		write_log (_T("%s: Failed to create working texture2: %s:%d\n"), D3DHEAD, D3D_ErrorString (hr), s - &shaders[0]);
+	if (FAILED (hr = d3d->d3ddev->CreateTexture (w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &s->lpWorkTexture2, NULL))) {
+		write_log (_T("%s: Failed to create working texture2: %s:%d\n"), D3DHEAD, D3D_ErrorString (hr), s - &d3d->shaders[0]);
 		return 0;
 	}
-	write_log (_T("%s: %d*%d working texture:%d\n"), D3DHEAD, w, h, s - &shaders[0]);
+	write_log (_T("%s: %d*%d working texture:%d\n"), D3DHEAD, w, h, s - &d3d->shaders[0]);
 	return 1;
 }
 
-static int createamigatexture (int w, int h)
+static int createamigatexture (struct d3dstruct *d3d, int w, int h)
 {
 	HRESULT hr;
 
-	texture = createtext (w, h, tformat);
-	if (!texture)
+	d3d->texture = createtext (d3d, w, h, d3d->tformat);
+	if (!d3d->texture)
 		return 0;
-	write_log (_T("%s: %d*%d main texture, depth %d\n"), D3DHEAD, w, h, t_depth);
-	if (psActive) {
+	write_log (_T("%s: %d*%d main texture, depth %d\n"), D3DHEAD, w, h, d3d->t_depth);
+	if (d3d->psActive) {
 		for (int i = 0; i < MAX_SHADERS; i++) {
 			int w2, h2;
-			int type = shaders[i].type;
+			int type = d3d->shaders[i].type;
 			if (type == SHADERTYPE_BEFORE) {
-				w2 = shaders[i].worktex_width;
-				h2 = shaders[i].worktex_height;
-				if (!allocextratextures (&shaders[i], w, h))
+				w2 = d3d->shaders[i].worktex_width;
+				h2 = d3d->shaders[i].worktex_height;
+				if (!allocextratextures (d3d, &d3d->shaders[i], w, h))
 					return 0;
 			} else if (type == SHADERTYPE_MIDDLE) {
-				w2 = shaders[i].worktex_width;
-				h2 = shaders[i].worktex_height;
+				w2 = d3d->shaders[i].worktex_width;
+				h2 = d3d->shaders[i].worktex_height;
 			} else {
-				w2 = window_w;
-				h2 = window_h;
+				w2 = d3d->window_w;
+				h2 = d3d->window_h;
 			}
 			if (type == SHADERTYPE_BEFORE || type == SHADERTYPE_AFTER || type == SHADERTYPE_MIDDLE) {
 				D3DLOCKED_BOX lockedBox;
-				if (FAILED (hr = d3ddev->CreateVolumeTexture (256, 16, 256, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &shaders[i].lpHq2xLookupTexture, NULL))) {
+				if (FAILED (hr = d3d->d3ddev->CreateVolumeTexture (256, 16, 256, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &d3d->shaders[i].lpHq2xLookupTexture, NULL))) {
 					write_log (_T("%s: Failed to create volume texture: %s:%d\n"), D3DHEAD, D3D_ErrorString (hr), i);
 					return 0;
 				}
-				if (FAILED (hr = shaders[i].lpHq2xLookupTexture->LockBox (0, &lockedBox, NULL, 0))) {
+				if (FAILED (hr = d3d->shaders[i].lpHq2xLookupTexture->LockBox (0, &lockedBox, NULL, 0))) {
 					write_log (_T("%s: Failed to lock box of volume texture: %s:%d\n"), D3DHEAD, D3D_ErrorString (hr), i);
 					return 0;
 				}
 				write_log (_T("HQ2X texture (%dx%d) (%dx%d):%d\n"), w2, h2, w, h, i);
 				BuildHq2xLookupTexture (w2, h2, w, h,  (unsigned char*)lockedBox.pBits);
-				shaders[i].lpHq2xLookupTexture->UnlockBox (0);
+				d3d->shaders[i].lpHq2xLookupTexture->UnlockBox (0);
 			}
 		}
 	}
 	return 1;
 }
 
-static int createtexture (int ow, int oh, int win_w, int win_h)
+static int createtexture (struct d3dstruct *d3d, int ow, int oh, int win_w, int win_h)
 {
 	HRESULT hr;
 	bool haveafter = false;
 
 	int zw, zh;
 
-	if (ow > win_w * dmultx && oh > win_h * dmultx) {
+	if (ow > win_w * d3d->dmultxh && oh > win_h * d3d->dmultxv) {
 		zw = ow;
 		zh = oh;
 	} else {
-		zw = win_w * dmultx;
-		zh = win_h * dmultx;
+		zw = win_w * d3d->dmultxh;
+		zh = win_h * d3d->dmultxv;
 	}
 	for (int i = 0; i < MAX_SHADERS; i++) {
-		if (shaders[i].type == SHADERTYPE_BEFORE || shaders[i].type == SHADERTYPE_AFTER || shaders[i].type == SHADERTYPE_MIDDLE) {
+		if (d3d->shaders[i].type == SHADERTYPE_BEFORE || d3d->shaders[i].type == SHADERTYPE_AFTER || d3d->shaders[i].type == SHADERTYPE_MIDDLE) {
 			int w2, h2, w, h;
-			if (shaders[i].type == SHADERTYPE_AFTER) {
+			if (d3d->shaders[i].type == SHADERTYPE_AFTER) {
 				w2 = zw; h2 = zh;
 				w = zw; h = zh;
 				haveafter = true;
-				if (!allocextratextures (&shaders[i], window_w, window_h))
+				if (!allocextratextures (d3d, &d3d->shaders[i], d3d->window_w, d3d->window_h))
 					return 0;
-			} else if (shaders[i].type == SHADERTYPE_MIDDLE) {
+			} else if (d3d->shaders[i].type == SHADERTYPE_MIDDLE) {
 				// worktex_width = 800
 				// extratex = amiga res
 				w2 = zw; h2 = zh;
 				w = zw; h = zh;
-				if (!allocextratextures (&shaders[i], ow, oh))
+				if (!allocextratextures (d3d, &d3d->shaders[i], ow, oh))
 					return 0;
 			} else {
 				w2 = ow;
@@ -1267,35 +1361,36 @@ static int createtexture (int ow, int oh, int win_w, int win_h)
 				w = ow;
 				h = oh;
 			}
-			if (FAILED (hr = d3ddev->CreateTexture (w2, h2, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &shaders[i].lpTempTexture, NULL))) {
-				write_log (_T("%s: Failed to create working texture1: %s:%d:%d\n"), D3DHEAD, D3D_ErrorString (hr), i, shaders[i].type);
+			d3d->shaders[i].targettex_width = w2;
+			d3d->shaders[i].targettex_height = h2;
+			if (FAILED (hr = d3d->d3ddev->CreateTexture (w2, h2, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &d3d->shaders[i].lpTempTexture, NULL))) {
+				write_log (_T("%s: Failed to create working texture1: %s:%d:%d\n"), D3DHEAD, D3D_ErrorString (hr), i, d3d->shaders[i].type);
 				return 0;
 			}
-			write_log (_T("%s: %d*%d temp texture:%d:%d\n"), D3DHEAD, w2, h2, i, shaders[i].type);
-			shaders[i].worktex_width = w;
-			shaders[i].worktex_height = h;
+			write_log (_T("%s: %d*%d temp texture:%d:%d\n"), D3DHEAD, w2, h2, i, d3d->shaders[i].type);
+			d3d->shaders[i].worktex_width = w;
+			d3d->shaders[i].worktex_height = h;
 		}
 	}
 	if (haveafter) {
-		if (FAILED (hr = d3ddev->CreateTexture (window_w, window_h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &lpPostTempTexture, NULL))) {
+		if (FAILED (hr = d3d->d3ddev->CreateTexture (d3d->window_w, d3d->window_h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &d3d->lpPostTempTexture, NULL))) {
 			write_log (_T("%s: Failed to create temp texture: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 			return 0;
 		}
-		write_log (_T("%s: %d*%d after texture\n"), D3DHEAD, window_w, window_h);
+		write_log (_T("%s: %d*%d after texture\n"), D3DHEAD, d3d->window_w, d3d->window_h);
 	}
 	return 1;
 }
 
-static void updateleds (void)
+static void updateleds (struct d3dstruct *d3d)
 {
 	D3DLOCKED_RECT locked;
 	HRESULT hr;
 	static uae_u32 rc[256], gc[256], bc[256], a[256];
 	static int done;
-	int i, y;
 
 	if (!done) {
-		for (i = 0; i < 256; i++) {
+		for (int i = 0; i < 256; i++) {
 			rc[i] = i << 16;
 			gc[i] = i << 8;
 			bc[i] = i << 0;
@@ -1303,93 +1398,113 @@ static void updateleds (void)
 		}
 		done = 1;
 	}
-	hr = ledtexture->LockRect (0, &locked, NULL, D3DLOCK_DISCARD);
+
+	if (d3d != &d3ddata[0])
+		return;
+
+	hr = d3d->ledtexture->LockRect (0, &locked, NULL, D3DLOCK_DISCARD);
 	if (FAILED (hr)) {
 		write_log (_T("%d: SL LockRect failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		return;
 	}
-	for (y = 0; y < TD_TOTAL_HEIGHT; y++) {
+
+	for (int y = 0; y < TD_TOTAL_HEIGHT * d3d->statusbar_vx; y++) {
 		uae_u8 *buf = (uae_u8*)locked.pBits + y * locked.Pitch;
-		statusline_single_erase(buf, 32 / 8, y, ledwidth);
+		statusline_single_erase(d3d - d3ddata, buf, 32 / 8, y, d3d->ledwidth * d3d->statusbar_hx);
 	}
-	statusline_render((uae_u8*)locked.pBits, 32 / 8, locked.Pitch, ledwidth, ledheight, rc, gc, bc, a);
-	for (y = 0; y < TD_TOTAL_HEIGHT; y++) {
-		uae_u8 *buf = (uae_u8*)locked.pBits + y * locked.Pitch;
-		draw_status_line_single (buf, 32 / 8, y, ledwidth, rc, gc, bc, a);
+	statusline_render(d3d - d3ddata, (uae_u8*)locked.pBits, 32 / 8, locked.Pitch, d3d->ledwidth, d3d->ledheight, rc, gc, bc, a);
+
+	int y = 0;
+	for (int yy = 0; yy < d3d->statusbar_vx * TD_TOTAL_HEIGHT; yy++) {
+		uae_u8 *buf = (uae_u8*)locked.pBits + yy * locked.Pitch;
+		draw_status_line_single(d3d - d3ddata, buf, 32 / 8, y, d3d->ledwidth, rc, gc, bc, a);
+		if ((yy % d3d->statusbar_vx) == 0)
+			y++;
 	}
-	ledtexture->UnlockRect (0);
+
+	d3d->ledtexture->UnlockRect (0);
 }
 
-static int createledtexture (void)
+static int createledtexture (struct d3dstruct *d3d)
 {
-	ledwidth = window_w;
-	ledheight = TD_TOTAL_HEIGHT;
-	ledtexture = createtext (ledwidth, ledheight, D3DFMT_A8R8G8B8);
-	if (!ledtexture)
+	d3d->ledwidth = d3d->window_w;
+	d3d->ledheight = TD_TOTAL_HEIGHT;
+	if (d3d->statusbar_hx < 1)
+		d3d->statusbar_hx = 1;
+	if (d3d->statusbar_vx < 1)
+		d3d->statusbar_vx = 1;
+	d3d->ledtexture = createtext (d3d, d3d->ledwidth * d3d->statusbar_hx, d3d->ledheight * d3d->statusbar_vx, D3DFMT_A8R8G8B8);
+	if (!d3d->ledtexture)
 		return 0;
 	return 1;
 }
 
-static int createsltexture (void)
+static int createsltexture (struct d3dstruct *d3d)
 {
-	sltexture = createtext (required_sl_texture_w, required_sl_texture_h, t_depth < 32 ? D3DFMT_A4R4G4B4 : D3DFMT_A8R8G8B8);
-	if (!sltexture)
+	d3d->sltexture = createtext (d3d, d3d->required_sl_texture_w, d3d->required_sl_texture_h, d3d->t_depth < 32 ? D3DFMT_A4R4G4B4 : D3DFMT_A8R8G8B8);
+	if (!d3d->sltexture)
 		return 0;
-	write_log (_T("%s: SL %d*%d texture allocated\n"), D3DHEAD, required_sl_texture_w, required_sl_texture_h);
-	maskmult_x = 1.0f;
-	maskmult_y = 1.0f;
+	write_log (_T("%s: SL %d*%d texture allocated\n"), D3DHEAD, d3d->required_sl_texture_w, d3d->required_sl_texture_h);
+	d3d->maskmult_x = 1.0f;
+	d3d->maskmult_y = 1.0f;
 	return 1;
 }
 
-static void createscanlines (int force)
+static void createscanlines (struct d3dstruct *d3d, int force)
 {
 	HRESULT hr;
 	D3DLOCKED_RECT locked;
-	static int osl1, osl2, osl3;
 	int sl4, sl42;
 	int l1, l2;
 	int x, y, yy;
 	uae_u8 *sld, *p;
 	int bpp;
 
-	if (osl1 == filterd3d->gfx_filter_scanlines && osl3 == filterd3d->gfx_filter_scanlinelevel && osl2 == filterd3d->gfx_filter_scanlineratio && !force)
+	if (d3d->scanline_osl1 == d3d->filterd3d->gfx_filter_scanlines &&
+		d3d->scanline_osl3 == d3d->filterd3d->gfx_filter_scanlinelevel &&
+		d3d->scanline_osl2 == d3d->filterd3d->gfx_filter_scanlineratio &&
+		d3d->scanline_osl4 == d3d->filterd3d->gfx_filter_scanlineoffset &&
+		!force)
 		return;
-	bpp = t_depth < 32 ? 2 : 4;
-	osl1 = filterd3d->gfx_filter_scanlines;
-	osl3 = filterd3d->gfx_filter_scanlinelevel;
-	osl2 = filterd3d->gfx_filter_scanlineratio;
-	sl4 = filterd3d->gfx_filter_scanlines * 16 / 100;
-	sl42 = filterd3d->gfx_filter_scanlinelevel * 16 / 100;
+	bpp = d3d->t_depth < 32 ? 2 : 4;
+	d3d->scanline_osl1 = d3d->filterd3d->gfx_filter_scanlines;
+	d3d->scanline_osl3 = d3d->filterd3d->gfx_filter_scanlinelevel;
+	d3d->scanline_osl2 = d3d->filterd3d->gfx_filter_scanlineratio;
+	d3d->scanline_osl4 = d3d->filterd3d->gfx_filter_scanlineoffset;
+	sl4 = d3d->filterd3d->gfx_filter_scanlines * 16 / 100;
+	sl42 = d3d->filterd3d->gfx_filter_scanlinelevel * 16 / 100;
 	if (sl4 > 15)
 		sl4 = 15;
 	if (sl42 > 15)
 		sl42 = 15;
-	l1 = (filterd3d->gfx_filter_scanlineratio >> 0) & 15;
-	l2 = (filterd3d->gfx_filter_scanlineratio >> 4) & 15;
+	l1 = (d3d->filterd3d->gfx_filter_scanlineratio >> 0) & 15;
+	l2 = (d3d->filterd3d->gfx_filter_scanlineratio >> 4) & 15;
 
 	if (l1 + l2 <= 0)
 		return;
 
-	if (!sltexture) {
-		if (osl1 == 0 && osl3 == 0)
+	if (!d3d->sltexture) {
+		if (d3d->scanline_osl1 == 0 && d3d->scanline_osl3 == 0)
 			return;
-		if (!createsltexture ())
+		if (!createsltexture (d3d))
 			return;
 	}
 
-	hr = sltexture->LockRect (0, &locked, NULL, 0);
+	hr = d3d->sltexture->LockRect (0, &locked, NULL, 0);
 	if (FAILED (hr)) {
 		write_log (_T("%s: SL LockRect failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		return;
 	}
 	sld = (uae_u8*)locked.pBits;
-	for (y = 0; y < required_sl_texture_h; y++)
-		memset (sld + y * locked.Pitch, 0, required_sl_texture_w * bpp);
-	for (y = 1; y < required_sl_texture_h; y += l1 + l2) {
-		for (yy = 0; yy < l2 && y + yy < required_sl_texture_h; yy++) {
-			for (x = 0; x < required_sl_texture_w; x++) {
+	for (y = 0; y < d3d->required_sl_texture_h; y++) {
+		memset(sld + y * locked.Pitch, 0, d3d->required_sl_texture_w * bpp);
+	}
+	for (y = 0; y < d3d->required_sl_texture_h; y += l1 + l2) {
+		int y2 = y + (d3d->filterd3d->gfx_filter_scanlineoffset % (l1 + 1));
+		for (yy = 0; yy < l2 && y2 + yy < d3d->required_sl_texture_h; yy++) {
+			for (x = 0; x < d3d->required_sl_texture_w; x++) {
 				uae_u8 sll = sl42;
-				p = &sld[(y + yy) * locked.Pitch + (x * bpp)];
+				p = &sld[(y2 + yy) * locked.Pitch + (x * bpp)];
 				if (bpp < 4) {
 					/* 16-bit, A4R4G4B4 */
 					p[1] = (sl4 << 4) | (sll << 0);
@@ -1406,21 +1521,141 @@ static void createscanlines (int force)
 			}
 		}
 	}
-	sltexture->UnlockRect (0);
+	d3d->sltexture->UnlockRect (0);
 }
 
-static int findedge (D3DLOCKED_RECT *lock, int w, int h, int dx, int dy)
+#include "png.h"
+
+struct uae_image
+{
+	uae_u8 *data;
+	int width, height, pitch;
+};
+
+struct png_cb
+{
+	uae_u8 *ptr;
+	int size;
+};
+
+static void __cdecl readcallback(png_structp png_ptr, png_bytep out, png_size_t count)
+{
+	png_voidp io_ptr = png_get_io_ptr(png_ptr);
+
+	if (!io_ptr)
+		return;
+	struct png_cb *cb = (struct png_cb*)io_ptr;
+	if (count > cb->size)
+		count = cb->size;
+	memcpy(out, cb->ptr, count);
+	cb->ptr += count;
+	cb->size -= count;
+}
+
+static bool load_png_image(struct zfile *zf, struct uae_image *img)
+{
+	extern unsigned char test_card_png[];
+	extern unsigned int test_card_png_len;
+	uae_u8 *b = test_card_png;
+	uae_u8 *bfree = NULL;
+	png_structp png_ptr;
+	png_infop info_ptr;
+	png_uint_32 width, height;
+	int depth, color_type;
+	struct png_cb cb;
+	png_bytepp row_pp;
+	png_size_t cols;
+	bool ok = false;
+
+	memset(img, 0, sizeof(struct uae_image));
+	int size;
+	uae_u8 *bb = zfile_getdata(zf, 0, -1, &size);
+	if (!bb)
+		goto end;
+	b = bb;
+	bfree = bb;
+
+	if (!png_check_sig(b, 8))
+		goto end;
+
+	png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, 0, 0, 0);
+	if (!png_ptr)
+		goto end;
+	info_ptr = png_create_info_struct(png_ptr);
+	if (!info_ptr) {
+		png_destroy_read_struct(&png_ptr, 0, 0);
+		goto end;
+	}
+	cb.ptr = b;
+	cb.size = size;
+	png_set_read_fn(png_ptr, &cb, readcallback);
+
+	png_read_info(png_ptr, info_ptr);
+
+	png_get_IHDR(png_ptr, info_ptr, &width, &height, &depth, &color_type, 0, 0, 0);
+
+	if (color_type == PNG_COLOR_TYPE_PALETTE)
+		png_set_expand(png_ptr);
+	if (color_type == PNG_COLOR_TYPE_GRAY && depth < 8)
+		png_set_expand(png_ptr);
+
+	if (depth > 8)
+		png_set_strip_16(png_ptr);
+	if (depth < 8)
+		png_set_packing(png_ptr);
+	if (!(color_type & PNG_COLOR_MASK_ALPHA))
+		png_set_add_alpha(png_ptr, 0xff, PNG_FILLER_AFTER);
+
+	png_set_bgr(png_ptr);
+
+	cols = png_get_rowbytes(png_ptr, info_ptr);
+
+	img->pitch = width * 4;
+	img->width = width;
+	img->height = height;
+
+	row_pp = new png_bytep[height];
+
+	img->data = xcalloc(uae_u8, width * height * 4);
+
+	for (int i = 0; i < height; i++) {
+		row_pp[i] = (png_bytep)&img->data[i * img->pitch];
+	}
+
+	png_read_image(png_ptr, row_pp);
+	png_read_end(png_ptr, info_ptr);
+
+	png_destroy_read_struct(&png_ptr, &info_ptr, 0);
+
+	delete[] row_pp;
+
+	ok = true;
+end:
+	xfree(bfree);
+
+	return ok;
+}
+
+static void free_uae_image(struct uae_image *img)
+{
+	if (!img)
+		return;
+	xfree(img->data);
+	img->data = NULL;
+}
+
+static int findedge(struct uae_image *img, int w, int h, int dx, int dy)
 {
 	int x = w / 2;
 	int y = h / 2;
-	
+
 	if (dx != 0)
 		x = dx < 0 ? 0 : w - 1;
 	if (dy != 0)
 		y = dy < 0 ? 0 : h - 1;
-	
+
 	for (;;) {
-		uae_u32 *p = (uae_u32*)((uae_u8*)lock->pBits + y * lock->Pitch + x * 4);
+		uae_u32 *p = (uae_u32*)(img->data + y * img->pitch + x * 4);
 		int alpha = (*p) >> 24;
 		if (alpha != 255)
 			break;
@@ -1436,21 +1671,105 @@ static int findedge (D3DLOCKED_RECT *lock, int w, int h, int dx, int dy)
 	return y;
 }
 
-static int createmask2texture (const TCHAR *filename)
+static void narrowimg(struct uae_image *img, int *xop, int *yop, const TCHAR *name)
 {
+	int x1, x2, y1, y2;
+
+	for (y1 = 0; y1 < img->height; y1++) {
+		bool tline = true;
+		for (int x = 0; x < img->width; x++) {
+			uae_u8 *p = img->data + y1 * img->pitch + x * 4;
+			if (p[3] != 0x00)
+				tline = false;
+		}
+		if (!tline)
+			break;
+	}
+
+	for (y2 = img->height - 1; y2 >= y1; y2--) {
+		bool tline = true;
+		for (int x = 0; x < img->width; x++) {
+			uae_u8 *p = img->data + y2 * img->pitch + x * 4;
+			if (p[3] != 0x00)
+				tline = false;
+		}
+		if (!tline)
+			break;
+	}
+
+	for (x1 = 0; x1 < img->width; x1++) {
+		bool tline = true;
+		for (int y = y1; y <= y2; y++) {
+			uae_u8 *p = img->data + y * img->pitch + x1 * 4;
+			if (p[3] != 0x00)
+				tline = false;
+		}
+		if (!tline)
+			break;
+	}
+
+	for (x2 = img->width - 1; x2 >= x1; x2--) {
+		bool tline = true;
+		for (int y = y1; y <= y2; y++) {
+			uae_u8 *p = img->data + y * img->pitch + x2 * 4;
+			if (p[3] != 0x00)
+				tline = false;
+		}
+		if (!tline)
+			break;
+	}
+
+	int w = x2 - x1 + 1;
+	int h = y2 - y1 + 1;
+	int pitch = w * 4;
+
+	*xop = x1;
+	*yop = y1;
+
+	uae_u8 *d = xcalloc(uae_u8, img->width * img->height * 4);
+	for (int y = 0; y < h; y++) {
+		uae_u8 *dp = d + y * pitch;
+		uae_u8 *sp = img->data + (y + y1) * img->pitch + x1 * 4;
+		memcpy(dp, sp, w * 4);
+	}
+
+	write_log(_T("Overlay LED: '%s' %d*%d -> %d*%d (%d*%d - %d*%d)\n"), name, img->width, img->height, w, h, x1, y1, x2, y2);
+
+	xfree(img->data);
+	img->width = w;
+	img->height = h;
+	img->pitch = pitch;
+	img->data = d;
+}
+
+static uae_u8 dimming(uae_u8 v)
+{
+	return v * currprefs.power_led_dim / 100;
+}
+
+static int createmask2texture (struct d3dstruct *d3d, const TCHAR *filename)
+{
+	struct AmigaMonitor *mon = &AMonitors[d3d - d3ddata];
 	struct zfile *zf;
-	int size;
-	uae_u8 *buf;
 	LPDIRECT3DTEXTURE9 tx;
 	HRESULT hr;
-	D3DXIMAGE_INFO dinfo;
 	TCHAR tmp[MAX_DPATH];
+	TCHAR filepath[MAX_DPATH];
+	D3DLOCKED_RECT locked;
 
-	if (mask2texture)
-		mask2texture->Release();
-	mask2texture = NULL;
+	if (d3d->mask2texture)
+		d3d->mask2texture->Release();
+	d3d->mask2texture = NULL;
+	for (int i = 0; overlayleds[i]; i++) {
+		if (d3d->mask2textureleds[i])
+			d3d->mask2textureleds[i]->Release();
+		d3d->mask2textureleds[i] = NULL;
+	}
+	if (d3d->mask2textureled_power_dim)
+		d3d->mask2textureled_power_dim->Release();
+	d3d->mask2textureled_power_dim = NULL;
 
-	if (filename[0] == 0 || WIN32GFX_IsPicassoScreen ())
+	if (filename[0] == 0)
 		return 0;
 
 	zf = NULL;
@@ -1481,11 +1800,12 @@ static int createmask2texture (const TCHAR *filename)
 				s2--;
 			}
 			_tcscpy (tmp2, s);
-			_stprintf (s, _T("_%dx%d%s"), window_w, window_h, tmp2);
+			_stprintf (s, _T("_%dx%d%s"), d3d->window_w, d3d->window_h, tmp2);
+			_tcscpy(filepath, tmp3);
 			zf = zfile_fopen (tmp3, _T("rb"), ZFD_NORMAL);
 			if (zf)
 				break;
-			float aspect = (float)window_w / window_h;
+			float aspect = (float)d3d->window_w / d3d->window_h;
 			int ax = -1, ay = -1;
 			if (abs (aspect - 16.0 / 10.0) <= 0.1)
 				ax = 16, ay = 10;
@@ -1495,11 +1815,13 @@ static int createmask2texture (const TCHAR *filename)
 				ax = 4, ay = 3;
 			if (ax > 0 && ay > 0) {
 				_stprintf (s, _T("_%dx%d%s"), ax, ay, tmp2);
+				_tcscpy(filepath, tmp3);
 				zf = zfile_fopen (tmp3, _T("rb"), ZFD_NORMAL);
 				if (zf)
 					break;
 			}
 		}
+		_tcscpy(filepath, tmp);
 		zf = zfile_fopen (tmp, _T("rb"), ZFD_NORMAL);
 		if (zf)
 			break;
@@ -1508,102 +1830,168 @@ static int createmask2texture (const TCHAR *filename)
 		write_log (_T("%s: couldn't open overlay '%s'\n"), D3DHEAD, filename);
 		return 0;
 	}
-	size = zfile_size (zf);
-	buf = xmalloc (uae_u8, size);
-	zfile_fread (buf, size, 1, zf);
-	zfile_fclose (zf);
-	hr = D3DXCreateTextureFromFileInMemoryEx (d3ddev, buf, size,
-		 D3DX_DEFAULT_NONPOW2, D3DX_DEFAULT_NONPOW2, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8,
-		 D3DPOOL_DEFAULT, D3DX_FILTER_NONE, D3DX_FILTER_NONE, 0, &dinfo, NULL, &tx);
-	xfree (buf);
-	if (FAILED (hr)) {
-		write_log (_T("%s: overlay texture load failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
+	struct uae_image img;
+	if (!load_png_image(zf, &img)) {
+		write_log(_T("Overlay texture '%s' load failed.\n"), filename);
 		goto end;
 	}
-	mask2texture_w = dinfo.Width;
-	mask2texture_h = dinfo.Height;
-	mask2texture = tx;
-	mask2rect.left = 0;
-	mask2rect.top = 0;
-	mask2rect.right = mask2texture_w;
-	mask2rect.bottom = mask2texture_h;
 
-	D3DLOCKED_RECT lock;
-	if (SUCCEEDED (hr = mask2texture->LockRect (0, &lock, NULL, 0))) {
-		mask2rect.left = findedge (&lock, mask2texture_w, mask2texture_h, -1, 0);
-		mask2rect.right = findedge (&lock, mask2texture_w, mask2texture_h, 1, 0);
-		mask2rect.top = findedge (&lock, mask2texture_w, mask2texture_h, 0, -1);
-		mask2rect.bottom = findedge (&lock, mask2texture_w, mask2texture_h, 0, 1);
-		mask2texture->UnlockRect (0);
+	tx = createtext(d3d, img.width, img.height, D3DFMT_A8R8G8B8);
+	if (!tx) {
+		write_log(_T("%s: overlay texture load failed.\n"), D3DHEAD);
+		goto end;
 	}
-	if (mask2rect.left >= mask2texture_w / 2 || mask2rect.top >= mask2texture_h / 2 ||
-		mask2rect.right <= mask2texture_w / 2 || mask2rect.bottom <= mask2texture_h / 2) {
-		mask2rect.left = 0;
-		mask2rect.top = 0;
-		mask2rect.right = mask2texture_w;
-		mask2rect.bottom = mask2texture_h;
+
+	d3d->mask2texture_w = img.width;
+	d3d->mask2texture_h = img.height;
+	d3d->mask2texture = tx;
+
+	hr = tx->LockRect(0, &locked, NULL, 0);
+	if (FAILED(hr)) {
+		write_log(_T("%s: Overlay LockRect failed: %s\n"), D3DHEAD, D3D_ErrorString(hr));
+		goto end;
 	}
-	mask2texture_multx = (float)window_w / mask2texture_w;
-	mask2texture_multy = (float)window_h / mask2texture_h;
-	mask2texture_offsetw = 0;
+	for (int i = 0; i < img.height; i++) {
+		memcpy((uae_u8*)locked.pBits + i * locked.Pitch, img.data + i * img.pitch, img.width * 4);
+	}
+	tx->UnlockRect(0);
+
+	d3d->mask2rect.left = findedge(&img, d3d->mask2texture_w, d3d->mask2texture_h, -1, 0);
+	d3d->mask2rect.right = findedge(&img, d3d->mask2texture_w, d3d->mask2texture_h, 1, 0);
+	d3d->mask2rect.top = findedge(&img, d3d->mask2texture_w, d3d->mask2texture_h, 0, -1);
+	d3d->mask2rect.bottom = findedge(&img, d3d->mask2texture_w, d3d->mask2texture_h, 0, 1);
+
+	if (d3d->mask2rect.left >= d3d->mask2texture_w / 2 || d3d->mask2rect.top >= d3d->mask2texture_h / 2 ||
+		d3d->mask2rect.right <= d3d->mask2texture_w / 2 || d3d->mask2rect.bottom <= d3d->mask2texture_h / 2) {
+		d3d->mask2rect.left = 0;
+		d3d->mask2rect.top = 0;
+		d3d->mask2rect.right = d3d->mask2texture_w;
+		d3d->mask2rect.bottom = d3d->mask2texture_h;
+	}
+	d3d->mask2texture_multx = (float)d3d->window_w / d3d->mask2texture_w;
+	d3d->mask2texture_multy = (float)d3d->window_h / d3d->mask2texture_h;
+	d3d->mask2texture_offsetw = 0;
 
 	if (isfullscreen () > 0) {
-		struct MultiDisplay *md = getdisplay (&currprefs);
+		struct MultiDisplay *md = getdisplay(&currprefs, mon->monitor_id);
 		float deskw = md->rect.right - md->rect.left;
 		float deskh = md->rect.bottom - md->rect.top;
 		//deskw = 800; deskh = 600;
 		float dstratio = deskw / deskh;
-		float srcratio = mask2texture_w / mask2texture_h;
-		mask2texture_multx *= srcratio / dstratio;
+		float srcratio = d3d->mask2texture_w / d3d->mask2texture_h;
+		d3d->mask2texture_multx *= srcratio / dstratio;
 	} else {
-		mask2texture_multx = mask2texture_multy;
+		d3d->mask2texture_multx = d3d->mask2texture_multy;
 	}
 
-	mask2texture_wh = window_h;
-	mask2texture_ww = mask2texture_w * mask2texture_multx; 
+	d3d->mask2texture_wh = d3d->window_h;
+	d3d->mask2texture_ww = d3d->mask2texture_w * d3d->mask2texture_multx; 
 
-	mask2texture_offsetw = (window_w - mask2texture_ww) / 2;
+	d3d->mask2texture_offsetw = (d3d->window_w - d3d->mask2texture_ww) / 2;
 
-	if (mask2texture_offsetw > 0)
-		blanktexture = createtext (mask2texture_offsetw + 1, window_h, D3DFMT_X8R8G8B8);
+	if (d3d->mask2texture_offsetw > 0)
+		d3d->blanktexture = createtext (d3d, d3d->mask2texture_offsetw + 1, d3d->window_h, D3DFMT_X8R8G8B8);
 
-	float xmult = mask2texture_multx;
-	float ymult = mask2texture_multy;
+	float xmult = d3d->mask2texture_multx;
+	float ymult = d3d->mask2texture_multy;
 
-	mask2rect.left *= xmult;
-	mask2rect.right *= xmult;
-	mask2rect.top *= ymult;
-	mask2rect.bottom *= ymult;
-	mask2texture_wwx = mask2texture_w * xmult;
-	if (mask2texture_wwx > window_w)
-		mask2texture_wwx = window_w;
-	if (mask2texture_wwx < mask2rect.right - mask2rect.left)
-		mask2texture_wwx = mask2rect.right - mask2rect.left;
-	if (mask2texture_wwx > mask2texture_ww)
-		mask2texture_wwx = mask2texture_ww;
+	d3d->mask2rect.left *= xmult;
+	d3d->mask2rect.right *= xmult;
+	d3d->mask2rect.top *= ymult;
+	d3d->mask2rect.bottom *= ymult;
+	d3d->mask2texture_wwx = d3d->mask2texture_w * xmult;
+	if (d3d->mask2texture_wwx > d3d->window_w)
+		d3d->mask2texture_wwx = d3d->window_w;
+	if (d3d->mask2texture_wwx < d3d->mask2rect.right - d3d->mask2rect.left)
+		d3d->mask2texture_wwx = d3d->mask2rect.right - d3d->mask2rect.left;
+	if (d3d->mask2texture_wwx > d3d->mask2texture_ww)
+		d3d->mask2texture_wwx = d3d->mask2texture_ww;
 
-	mask2texture_minusx = - ((window_w - mask2rect.right) + mask2rect.left);
-	if (mask2texture_offsetw > 0)
-		mask2texture_minusx += mask2texture_offsetw * xmult;
+	d3d->mask2texture_minusx = - ((d3d->window_w - d3d->mask2rect.right) + d3d->mask2rect.left);
+	if (d3d->mask2texture_offsetw > 0)
+		d3d->mask2texture_minusx += d3d->mask2texture_offsetw * xmult;
 	
 
-	mask2texture_minusy = -(window_h - (mask2rect.bottom - mask2rect.top));
+	d3d->mask2texture_minusy = -(d3d->window_h - (d3d->mask2rect.bottom - d3d->mask2rect.top));
 
-	mask2texture_hhx = mask2texture_h * ymult;
+	d3d->mask2texture_hhx = d3d->mask2texture_h * ymult;
 
 	write_log (_T("%s: overlay '%s' %.0f*%.0f (%d*%d - %d*%d) (%d*%d)\n"),
-		D3DHEAD, tmp, mask2texture_w, mask2texture_h,
-		mask2rect.left, mask2rect.top, mask2rect.right, mask2rect.bottom,
-		mask2rect.right - mask2rect.left, mask2rect.bottom - mask2rect.top);
+		D3DHEAD, tmp, d3d->mask2texture_w, d3d->mask2texture_h,
+		d3d->mask2rect.left, d3d->mask2rect.top, d3d->mask2rect.right, d3d->mask2rect.bottom,
+		d3d->mask2rect.right - d3d->mask2rect.left, d3d->mask2rect.bottom - d3d->mask2rect.top);
+
+	for (int i = 0; overlayleds[i]; i++) {
+		if (!overlayleds[i][0])
+			continue;
+		TCHAR tmp1[MAX_DPATH];
+		_tcscpy(tmp1, filepath);
+		_tcscpy(tmp1 + _tcslen(tmp1) - 4, _T("_"));
+		_tcscpy(tmp1 + _tcslen(tmp1), overlayleds[i]);
+		_tcscat(tmp1, _T("_led"));
+		_tcscat(tmp1, filepath + _tcslen(filepath) - 4);
+		zf = zfile_fopen(tmp1, _T("rb"), ZFD_NORMAL);
+		if (zf) {
+			struct uae_image ledimg;
+			if (load_png_image(zf, &ledimg)) {
+				if (ledimg.width == img.width && ledimg.height == img.height) {
+					narrowimg(&ledimg, &d3d->mask2textureledoffsets[i * 2 + 0], &d3d->mask2textureledoffsets[i * 2 + 1], tmp1);
+					d3d->mask2textureleds[i] = createtext(d3d, ledimg.width, ledimg.height, D3DFMT_A8R8G8B8);
+					if (d3d->mask2textureleds[i]) {
+						hr = d3d->mask2textureleds[i]->LockRect(0, &locked, NULL, 0);
+						if (SUCCEEDED(hr)) {
+							for (int j = 0; j < ledimg.height; j++) {
+								memcpy((uae_u8*)locked.pBits + j * locked.Pitch, ledimg.data + j * ledimg.pitch, ledimg.width * 4);
+							}
+							d3d->mask2textureleds[i]->UnlockRect(0);
+						}
+					}
+					if (ledtypes[i] == LED_POWER) {
+						d3d->mask2textureled_power_dim = createtext(d3d, ledimg.width, ledimg.height, D3DFMT_A8R8G8B8);
+						if (d3d->mask2textureled_power_dim) {
+							hr = d3d->mask2textureled_power_dim->LockRect(0, &locked, NULL, 0);
+							if (SUCCEEDED(hr)) {
+								for (int j = 0; j < ledimg.height; j++) {
+									uae_u8 *pd = (uae_u8*)locked.pBits + j * locked.Pitch;
+									uae_u8 *ps = ledimg.data + j * ledimg.pitch;
+									for (int k = 0; k < ledimg.width; k++) {
+										pd[0] = dimming(ps[0]);
+										pd[1] = dimming(ps[1]);
+										pd[2] = dimming(ps[2]);
+										pd[3] = ps[3];
+										pd += 4;
+										ps += 4;
+									}
+								}
+								d3d->mask2textureled_power_dim->UnlockRect(0);
+							}
+						}
+					}
+				} else {
+					write_log(_T("Overlay led '%s' size mismatch.\n"), tmp1);
+				}
+				free_uae_image(&ledimg);
+			} else {
+				write_log(_T("Overlay led '%s' load failed.\n"), tmp1);
+			}
+			zfile_fclose(zf);
+		}
+	}
+
+	free_uae_image(&img);
 
 	return 1;
 end:
+	free_uae_image(&img);
 	if (tx)
 		tx->Release ();
+	if (d3d->blanktexture)
+		d3d->blanktexture->Release();
+	d3d->blanktexture = NULL;
 	return 0;
 }
 
-static int createmasktexture (const TCHAR *filename, struct shaderdata *sd)
+static int createmasktexture (struct d3dstruct *d3d, const TCHAR *filename, struct shaderdata *sd)
 {
 	struct zfile *zf;
 	int size;
@@ -1615,7 +2003,7 @@ static int createmasktexture (const TCHAR *filename, struct shaderdata *sd)
 	D3DXIMAGE_INFO dinfo;
 	TCHAR tmp[MAX_DPATH];
 	int maskwidth, maskheight;
-	int idx = sd - &shaders[0];
+	int idx = sd - &d3d->shaders[0];
 
 	if (filename[0] == 0)
 		return 0;
@@ -1634,7 +2022,7 @@ static int createmasktexture (const TCHAR *filename, struct shaderdata *sd)
 	buf = xmalloc (uae_u8, size);
 	zfile_fread (buf, size, 1, zf);
 	zfile_fclose (zf);
-	hr = D3DXCreateTextureFromFileInMemoryEx (d3ddev, buf, size,
+	hr = D3DXCreateTextureFromFileInMemoryEx (d3d->d3ddev, buf, size,
 		 D3DX_DEFAULT_NONPOW2, D3DX_DEFAULT_NONPOW2, 1, D3DUSAGE_DYNAMIC, D3DFMT_X8R8G8B8,
 		 D3DPOOL_DEFAULT, D3DX_FILTER_NONE, D3DX_FILTER_NONE, 0, &dinfo, NULL, &tx);
 	xfree (buf);
@@ -1662,13 +2050,13 @@ static int createmasktexture (const TCHAR *filename, struct shaderdata *sd)
 	} else {
 #endif
 		// both must be divisible by mask size
-		maskwidth = ((window_w + sd->masktexture_w - 1) / sd->masktexture_w) * sd->masktexture_w;
-		maskheight = ((window_h + sd->masktexture_h - 1) / sd->masktexture_h) * sd->masktexture_h;
+		maskwidth = ((d3d->window_w + sd->masktexture_w - 1) / sd->masktexture_w) * sd->masktexture_w;
+		maskheight = ((d3d->window_h + sd->masktexture_h - 1) / sd->masktexture_h) * sd->masktexture_h;
 #if 0
 	}
 #endif
 	if (tx) {
-		sd->masktexture = createtext (maskwidth, maskheight, D3DFMT_X8R8G8B8);
+		sd->masktexture = createtext (d3d, maskwidth, maskheight, D3DFMT_X8R8G8B8);
 		if (FAILED (hr)) {
 			write_log (_T("%s: mask texture creation failed: %s:%d\n"), D3DHEAD, D3D_ErrorString (hr), idx);
 			goto end;
@@ -1710,8 +2098,8 @@ static int createmasktexture (const TCHAR *filename, struct shaderdata *sd)
 		sd->masktexture_h = maskdesc.Height;
 	}
 	write_log (_T("%s: mask %d*%d (%d*%d) %d*%d ('%s':%d) texture allocated\n"), D3DHEAD, sd->masktexture_w, sd->masktexture_h, txdesc.Width, txdesc.Height, maskdesc.Width, maskdesc.Height, filename, idx);
-	maskmult_x = (float)window_w / sd->masktexture_w;
-	maskmult_y = (float)window_h / sd->masktexture_h;
+	d3d->maskmult_x = (float)d3d->window_w / sd->masktexture_w;
+	d3d->maskmult_y = (float)d3d->window_h / sd->masktexture_h;
 
 	return 1;
 end:
@@ -1723,22 +2111,25 @@ end:
 	return 0;
 }
 
-bool getscalerect (float *mx, float *my, float *sx, float *sy)
+static bool xD3D_getscalerect(int monid, float *mx, float *my, float *sx, float *sy, int width, int height)
 {
-	if (!mask2texture)
+	struct d3dstruct *d3d = &d3ddata[monid];
+	struct vidbuf_description *vidinfo = &adisplays[monid].gfxvidinfo;
+
+	if (!d3d->mask2texture)
 		return false;
 
-	float mw = mask2rect.right - mask2rect.left;
-	float mh = mask2rect.bottom - mask2rect.top;
+	float mw = d3d->mask2rect.right - d3d->mask2rect.left;
+	float mh = d3d->mask2rect.bottom - d3d->mask2rect.top;
 
-	float mxt = (float)mw / gfxvidinfo.outbuffer->inwidth2;
-	float myt = (float)mh / gfxvidinfo.outbuffer->inheight2;
+	float mxt = (float)mw / width;
+	float myt = (float)mh / height;
 
-	*mx = mask2texture_minusx / mxt;
-	*my = mask2texture_minusy / myt;
+	*mx = d3d->mask2texture_minusx / mxt;
+	*my = d3d->mask2texture_minusy / myt;
 
-	*sx = -((mask2texture_ww - mask2rect.right) - (mask2rect.left)) / 2;
-	*sy = -((mask2texture_wh - mask2rect.bottom) - (mask2rect.top)) / 2;
+	*sx = -((d3d->mask2texture_ww - d3d->mask2rect.right) - (d3d->mask2rect.left)) / 2;
+	*sy = -((d3d->mask2texture_wh - d3d->mask2rect.bottom) - (d3d->mask2rect.top)) / 2;
 
 	*sx /= mxt;
 	*sy /= myt;
@@ -1746,25 +2137,30 @@ bool getscalerect (float *mx, float *my, float *sx, float *sy)
 	return true;
 }
 
-static void setupscenecoords (void)
+static void setupscenecoords (struct d3dstruct *d3d, bool normalrender)
 {
+	int monid = d3d - d3ddata;
+	struct vidbuf_description *vidinfo = &adisplays[monid].gfxvidinfo;
 	RECT sr, dr, zr;
 	float w, h;
 	float dw, dh;
-	static RECT sr2, dr2, zr2;
+	static RECT sr2[MAX_AMIGAMONITORS], dr2[MAX_AMIGAMONITORS], zr2[MAX_AMIGAMONITORS];
+
+	if (!normalrender)
+		return;
 
 	//write_log (_T("%dx%d %dx%d %dx%d\n"), tin_w, tin_h, tin_w, tin_h, window_w, window_h);
 
-	getfilterrect2 (&dr, &sr, &zr, window_w, window_h, tin_w / dmult, tin_h / dmult, dmult, tin_w, tin_h);
+	getfilterrect2 (monid, &dr, &sr, &zr, d3d->window_w, d3d->window_h, d3d->tin_w / d3d->dmult, d3d->tin_h / d3d->dmult, d3d->dmult, d3d->tin_w, d3d->tin_h);
 
-	if (memcmp (&sr, &sr2, sizeof RECT) || memcmp (&dr, &dr2, sizeof RECT) || memcmp (&zr, &zr2, sizeof RECT)) {
+	if (memcmp (&sr, &sr2[monid], sizeof RECT) || memcmp (&dr, &dr2[monid], sizeof RECT) || memcmp (&zr, &zr2[monid], sizeof RECT)) {
 		write_log (_T("POS (%d %d %d %d) - (%d %d %d %d)[%d,%d] (%d %d)\n"),
 			dr.left, dr.top, dr.right, dr.bottom, sr.left, sr.top, sr.right, sr.bottom,
 			sr.right - sr.left, sr.bottom - sr.top,
 			zr.left, zr.top);
-		sr2 = sr;
-		dr2 = dr;
-		zr2 = zr;
+		sr2[monid] = sr;
+		dr2[monid] = dr;
+		zr2[monid] = zr;
 	}
 
 	dw = dr.right - dr.left;
@@ -1772,50 +2168,50 @@ static void setupscenecoords (void)
 	w = sr.right - sr.left;
 	h = sr.bottom - sr.top;
 
-	fakesize.x = w;
-	fakesize.y = h;
-	fakesize.w = 1;
-	fakesize.z = 1;
+	d3d->fakesize.x = w;
+	d3d->fakesize.y = h;
+	d3d->fakesize.w = 1;
+	d3d->fakesize.z = 1;
 
-	MatrixOrthoOffCenterLH (&m_matProj_out, 0, w + 0.05f, 0, h + 0.05f, 0.0f, 1.0f);
+	MatrixOrthoOffCenterLH (&d3d->m_matProj_out, 0, w + 0.05f, 0, h + 0.05f, 0.0f, 1.0f);
 
 	float tx, ty;
 	float sw, sh;
 
-	if (0 && mask2texture) {
+	if (0 && d3d->mask2texture) {
 
-		float mw = mask2rect.right - mask2rect.left;
-		float mh = mask2rect.bottom - mask2rect.top;
+		float mw = d3d->mask2rect.right - d3d->mask2rect.left;
+		float mh = d3d->mask2rect.bottom - d3d->mask2rect.top;
 
-		tx = -0.5f + dw * tin_w / mw / 2;
-		ty = +0.5f + dh * tin_h / mh / 2;
+		tx = -0.5f + dw * d3d->tin_w / mw / 2;
+		ty = +0.5f + dh * d3d->tin_h / mh / 2;
 
 		float xshift = -zr.left;
 		float yshift = -zr.top;
 
-		sw = dw * tin_w / gfxvidinfo.outbuffer->inwidth2;
-		sw *= mw / window_w;
+		sw = dw * d3d->tin_w / vidinfo->outbuffer->inwidth2;
+		sw *= mw / d3d->window_w;
 
-		tx = -0.5f + window_w / 2;
+		tx = -0.5f + d3d->window_w / 2;
 
-		sh = dh * tin_h / gfxvidinfo.outbuffer->inheight2;
-		sh *= mh / window_h;
+		sh = dh * d3d->tin_h / vidinfo->outbuffer->inheight2;
+		sh *= mh / d3d->window_h;
 
-		ty = +0.5f + window_h / 2;
+		ty = +0.5f + d3d->window_h / 2;
 
 		tx += xshift;
 		ty += yshift;
 
 	} else {
 
-		tx = -0.5f + dw * tin_w / window_w / 2;
-		ty = +0.5f + dh * tin_h / window_h / 2;
+		tx = -0.5f + dw * d3d->tin_w / d3d->window_w / 2;
+		ty = +0.5f + dh * d3d->tin_h / d3d->window_h / 2;
 
 		float xshift = - zr.left - sr.left; // - (tin_w - 2 * zr.left - w),
-		float yshift = + zr.top + sr.top - (tin_h - h);
+		float yshift = + zr.top + sr.top - (d3d->tin_h - h);
 	
-		sw = dw * tin_w / window_w;
-		sh = dh * tin_h / window_h;
+		sw = dw * d3d->tin_w / d3d->window_w;
+		sh = dh * d3d->tin_h / d3d->window_h;
 
 		//sw -= 0.5f;
 		//sh += 0.5f;
@@ -1825,53 +2221,56 @@ static void setupscenecoords (void)
 
 	}
 
-	MatrixTranslation (&m_matView_out, tx, ty, 1.0f);
+	MatrixTranslation (&d3d->m_matView_out, tx, ty, 1.0f);
 
-	MatrixScaling (&m_matWorld_out, sw + 0.5f / sw, sh + 0.5f / sh, 1.0f);
+	MatrixScaling (&d3d->m_matWorld_out, sw + 0.5f / sw, sh + 0.5f / sh, 1.0f);
 
-	cursor_offset_x = -zr.left;
-	cursor_offset_y = -zr.top;
+	d3d->cursor_offset_x = -zr.left;
+	d3d->cursor_offset_y = -zr.top;
 
 	//write_log (_T("%.1fx%.1f %.1fx%.1f %.1fx%.1f\n"), dw, dh, w, h, sw, sh);
 
 	// ratio between Amiga texture and overlay mask texture
-	float sw2 = dw * tin_w / window_w;
-	float sh2 = dh * tin_h / window_h;
+	float sw2 = dw * d3d->tin_w / d3d->window_w;
+	float sh2 = dh * d3d->tin_h / d3d->window_h;
 
 	//sw2 -= 0.5f;
 	//sh2 += 0.5f;
 
-	maskmult.x = sw2 * maskmult_x / w;
-	maskmult.y = sh2 * maskmult_y / h;
+	d3d->maskmult.x = sw2 * d3d->maskmult_x / w;
+	d3d->maskmult.y = sh2 * d3d->maskmult_y / h;
 
-	maskshift.x = 1.0f / maskmult_x;
-	maskshift.y = 1.0f / maskmult_y;
+	d3d->maskshift.x = 1.0f / d3d->maskmult_x;
+	d3d->maskshift.y = 1.0f / d3d->maskmult_y;
 
 	D3DXMATRIXA16 tmpmatrix;
-	D3DXMatrixMultiply (&tmpmatrix, &m_matWorld_out, &m_matView_out);
-	D3DXMatrixMultiply (&postproj, &tmpmatrix, &m_matProj_out);
+	D3DXMatrixMultiply (&tmpmatrix, &d3d->m_matWorld_out, &d3d->m_matView_out);
+	D3DXMatrixMultiply (&d3d->postproj, &tmpmatrix, &d3d->m_matProj_out);
 }
 
-uae_u8 *getfilterbuffer3d (struct vidbuffer *vb, int *widthp, int *heightp, int *pitch, int *depth)
+#if 0
+uae_u8 *getfilterbuffer3d(struct vidbuffer *vb, int *widthp, int *heightp, int *pitch, int *depth)
 {
+	struct d3dstruct *d3d = &d3ddata[0];
 	RECT dr, sr, zr;
 	uae_u8 *p;
 	int w, h;
 
-	*depth = t_depth;
-	getfilterrect2 (&dr, &sr, &zr, window_w, window_h, tin_w / dmult, tin_h / dmult, dmult, tin_w, tin_h);
+	*depth = d3d->t_depth;
+	getfilterrect2 (&dr, &sr, &zr, d3d->window_w, d3d->window_h, d3d->tin_w / d3d->dmult, d3d->tin_h / d3d->dmult, d3d->dmult, d3d->tin_w, d3d->tin_h);
 	w = sr.right - sr.left;
 	h = sr.bottom - sr.top;
 	p = vb->bufmem;
 	if (pitch)
 		*pitch = vb->rowbytes;
-	p += (zr.top - h / 2) * vb->rowbytes + (zr.left - w / 2) * t_depth / 8;
+	p += (zr.top - h / 2) * vb->rowbytes + (zr.left - w / 2) * d3d->t_depth / 8;
 	*widthp = w;
 	*heightp = h;
 	return p;
 }
+#endif
 
-static void createvertex (void)
+static void createvertex (struct d3dstruct *d3d)
 {
 	HRESULT hr;
 	struct TLVERTEX *vertices;
@@ -1879,7 +2278,7 @@ static void createvertex (void)
 
 	sizex = 1.0f;
 	sizey = 1.0f;
-	if (FAILED (hr = vertexBuffer->Lock (0, 0, (void**)&vertices, 0))) {
+	if (FAILED (hr = d3d->vertexBuffer->Lock (0, 0, (void**)&vertices, 0))) {
 		write_log (_T("%s: Vertexbuffer lock failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		return;
 	}
@@ -1910,62 +2309,62 @@ static void createvertex (void)
 	vertices[7].position.x = 1.0f; vertices[7].position.y = 1.0f;
 	vertices[7].diffuse  = 0xFFFFFF00;
 	vertices[7].texcoord.x = 1.0f; vertices[7].texcoord.y = 0.0f;
-	if (FAILED(hr = vertexBuffer->Unlock ()))
+	if (FAILED(hr = d3d->vertexBuffer->Unlock ()))
 		write_log (_T("%s: Vertexbuffer unlock failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 }
 
-static void settransform_pre (struct shaderdata *s)
+static void settransform_pre (struct d3dstruct *d3d, struct shaderdata *s)
 {
 	// Projection is (0,0,0) -> (1,1,1)
-	MatrixOrthoOffCenterLH (&m_matProj, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f);
+	MatrixOrthoOffCenterLH (&d3d->m_matProj, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f);
 	// Align texels with pixels
-	MatrixTranslation (&m_matView, -0.5f / tout_w, 0.5f / tout_h, 0.0f);
+	MatrixTranslation (&d3d->m_matView, -0.5f / d3d->tout_w, 0.5f / d3d->tout_h, 0.0f);
 	// Identity for world
-	D3DXMatrixIdentity (&m_matWorld);
+	D3DXMatrixIdentity (&d3d->m_matWorld);
 }
 
-static void settransform (struct shaderdata *s)
+static void settransform (struct d3dstruct *d3d, struct shaderdata *s)
 {
 	// Projection is (0,0,0) -> (1,1,1)
-	MatrixOrthoOffCenterLH (&m_matPreProj, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f);
+	MatrixOrthoOffCenterLH (&d3d->m_matPreProj, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f);
 	// Align texels with pixels
-	MatrixTranslation (&m_matPreView, -0.5f / tout_w, 0.5f / tout_h, 0.0f);
+	MatrixTranslation (&d3d->m_matPreView, -0.5f / d3d->tout_w, 0.5f / d3d->tout_h, 0.0f);
 	// Identity for world
-	D3DXMatrixIdentity (&m_matPreWorld);
+	D3DXMatrixIdentity (&d3d->m_matPreWorld);
 
 	if (s)
-		psEffect_SetMatrices (&m_matProj, &m_matView, &m_matWorld, s);
+		psEffect_SetMatrices (&d3d->m_matProj, &d3d->m_matView, &d3d->m_matWorld, s);
 
-	MatrixOrthoOffCenterLH (&m_matProj2, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f);
+	MatrixOrthoOffCenterLH (&d3d->m_matProj2, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f);
 
-	MatrixTranslation (&m_matView2, 0.5f - 0.5f / tout_w, 0.5f + 0.5f / tout_h, 0.0f);
+	MatrixTranslation (&d3d->m_matView2, 0.5f - 0.5f / d3d->tout_w, 0.5f + 0.5f / d3d->tout_h, 0.0f);
 
-	D3DXMatrixIdentity (&m_matWorld2);
+	D3DXMatrixIdentity (&d3d->m_matWorld2);
 }
 
-static void settransform2 (struct shaderdata *s)
+static void settransform2 (struct d3dstruct *d3d, struct shaderdata *s)
 {
 	// Projection is (0,0,0) -> (1,1,1)
-	MatrixOrthoOffCenterLH (&m_matPreProj, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f);
+	MatrixOrthoOffCenterLH (&d3d->m_matPreProj, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f);
 	// Align texels with pixels
-	MatrixTranslation (&m_matPreView, -0.5f / window_w, 0.5f / window_h, 0.0f);
+	MatrixTranslation (&d3d->m_matPreView, -0.5f / d3d->window_w, 0.5f / d3d->window_h, 0.0f);
 	// Identity for world
-	D3DXMatrixIdentity (&m_matPreWorld);
+	D3DXMatrixIdentity (&d3d->m_matPreWorld);
 
-	MatrixOrthoOffCenterLH (&m_matProj2, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f);
+	MatrixOrthoOffCenterLH (&d3d->m_matProj2, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f);
 
-	MatrixTranslation (&m_matView2, 0.5f - 0.5f / window_w, 0.5f + 0.5f / window_h, 0.0f);
-	D3DXMatrixIdentity (&m_matWorld2);
+	MatrixTranslation (&d3d->m_matView2, 0.5f - 0.5f / d3d->window_w, 0.5f + 0.5f / d3d->window_h, 0.0f);
+	D3DXMatrixIdentity (&d3d->m_matWorld2);
 }
 
-static void freetextures (void)
+static void freetextures (struct d3dstruct *d3d)
 {
-	if (texture) {
-		texture->Release ();
-		texture = NULL;
+	if (d3d->texture) {
+		d3d->texture->Release ();
+		d3d->texture = NULL;
 	}
 	for (int i = 0; i < MAX_SHADERS; i++) {
-		struct shaderdata *s = &shaders[i];
+		struct shaderdata *s = &d3d->shaders[i];
 		if (s->lpTempTexture) {
 			s->lpTempTexture->Release ();
 			s->lpTempTexture = NULL;
@@ -1983,221 +2382,248 @@ static void freetextures (void)
 			s->lpHq2xLookupTexture = NULL;
 		}
 	}
-	if (lpPostTempTexture) {
-		lpPostTempTexture->Release();
-		lpPostTempTexture = NULL;
+	if (d3d->lpPostTempTexture) {
+		d3d->lpPostTempTexture->Release();
+		d3d->lpPostTempTexture = NULL;
 	}
 }
 
-static void getswapchain (void)
+static void getswapchain (struct d3dstruct *d3d)
 {
-	if (!d3dswapchain) {
-		HRESULT hr = d3ddev->GetSwapChain (0, &d3dswapchain);
+	if (!d3d->d3dswapchain) {
+		HRESULT hr = d3d->d3ddev->GetSwapChain (0, &d3d->d3dswapchain);
 		if (FAILED (hr)) {
 			write_log (_T("%s: GetSwapChain() failed, %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		}
 	}
 }
 
-static void invalidatedeviceobjects (void)
+static void invalidatedeviceobjects (struct d3dstruct *d3d)
 {
-	if (filenotificationhandle != NULL)
-		FindCloseChangeNotification  (filenotificationhandle);
-	filenotificationhandle = NULL;
-	freetextures ();
-	if (query) {
-		query->Release();
-		query = NULL;
+	if (d3d->filenotificationhandle != NULL)
+		FindCloseChangeNotification  (d3d->filenotificationhandle);
+	d3d->filenotificationhandle = NULL;
+	freetextures (d3d);
+	if (d3d->query) {
+		d3d->query->Release();
+		d3d->query = NULL;
 	}
-	if (sprite) {
-		sprite->Release ();
-		sprite = NULL;
+	if (d3d->sprite) {
+		d3d->sprite->Release ();
+		d3d->sprite = NULL;
 	}
-	if (ledtexture) {
-		ledtexture->Release ();
-		ledtexture = NULL;
+	if (d3d->ledtexture) {
+		d3d->ledtexture->Release ();
+		d3d->ledtexture = NULL;
 	}
-	if (sltexture) {
-		sltexture->Release ();
-		sltexture = NULL;
+	if (d3d->sltexture) {
+		d3d->sltexture->Release ();
+		d3d->sltexture = NULL;
 	}
-	if (mask2texture) {
-		mask2texture->Release ();
-		mask2texture = NULL;
+	if (d3d->mask2texture) {
+		d3d->mask2texture->Release ();
+		d3d->mask2texture = NULL;
 	}
-	if (blanktexture) {
-		blanktexture->Release ();
-		blanktexture = NULL;
+	for (int i = 0; overlayleds[i]; i++) {
+		if (d3d->mask2textureleds[i])
+			d3d->mask2textureleds[i]->Release();
+		d3d->mask2textureleds[i] = NULL;
 	}
-	if (cursorsurfaced3d) {
-		cursorsurfaced3d->Release ();
-		cursorsurfaced3d = NULL;
+	if (d3d->mask2textureled_power_dim) {
+		d3d->mask2textureled_power_dim->Release();
+		d3d->mask2textureled_power_dim = NULL;
 	}
+	if (d3d->blanktexture) {
+		d3d->blanktexture->Release ();
+		d3d->blanktexture = NULL;
+	}
+	if (d3d->cursorsurfaced3d) {
+		d3d->cursorsurfaced3d->Release ();
+		d3d->cursorsurfaced3d = NULL;
+	}
+	struct d3d9overlay *ov = d3d->extoverlays;
+	while (ov) {
+		struct d3d9overlay *next = ov->next;
+		if (ov->tex)
+			ov->tex->Release();
+		xfree(ov);
+		ov = next;
+	}
+	d3d->extoverlays = NULL;
 	for (int i = 0; i < MAX_SHADERS; i++) {
-		if (shaders[i].pEffect) {
-			shaders[i].pEffect->Release ();
-			shaders[i].pEffect = NULL;
+		if (d3d->shaders[i].pEffect) {
+			d3d->shaders[i].pEffect->Release ();
+			d3d->shaders[i].pEffect = NULL;
 		}
-		if (shaders[i].masktexture) {
-			shaders[i].masktexture->Release ();
-			shaders[i].masktexture = NULL;
+		if (d3d->shaders[i].masktexture) {
+			d3d->shaders[i].masktexture->Release ();
+			d3d->shaders[i].masktexture = NULL;
 		}
-		memset (&shaders[i], 0, sizeof (struct shaderdata));
+		memset (&d3d->shaders[i], 0, sizeof (struct shaderdata));
 	}
-	postEffect_freeParameters();
-	if (d3ddev)
-		d3ddev->SetStreamSource (0, NULL, 0, 0);
-	if (vertexBuffer) {
-		vertexBuffer->Release ();
-		vertexBuffer = NULL;
+	postEffect_freeParameters(d3d);
+	if (d3d->d3ddev)
+		d3d->d3ddev->SetStreamSource (0, NULL, 0, 0);
+	if (d3d->vertexBuffer) {
+		d3d->vertexBuffer->Release ();
+		d3d->vertexBuffer = NULL;
 	}
-	if (d3dswapchain)  {
-		d3dswapchain->Release ();
-		d3dswapchain = NULL;
+	if (d3d->d3dswapchain)  {
+		d3d->d3dswapchain->Release ();
+		d3d->d3dswapchain = NULL;
 	}
-	locked = 0;
-	maskshift.x = maskshift.y = maskshift.z = maskshift.w = 0;
-	maskmult.x = maskmult.y = maskmult.z = maskmult.w = 0;
+	d3d->locked = 0;
+	d3d->maskshift.x = d3d->maskshift.y = d3d->maskshift.z = d3d->maskshift.w = 0;
+	d3d->maskmult.x = d3d->maskmult.y = d3d->maskmult.z = d3d->maskmult.w = 0;
 }
 
-static struct shaderdata *allocshaderslot (int type)
+static struct shaderdata *allocshaderslot (struct d3dstruct *d3d, int type)
 {
 	for (int i = 0; i < MAX_SHADERS; i++) {
-		if (shaders[i].type == 0) {
-			shaders[i].type = type;
-			return &shaders[i];
+		if (d3d->shaders[i].type == 0) {
+			d3d->shaders[i].type = type;
+			return &d3d->shaders[i];
 		}
 	}
 	return NULL;
 }
 
-static int restoredeviceobjects (void)
+static int restoredeviceobjects (struct d3dstruct *d3d)
 {
 	int vbsize;
 	int wasshader = shaderon;
 	HRESULT hr;
 
-	invalidatedeviceobjects ();
-	getswapchain ();
+	invalidatedeviceobjects (d3d);
+	getswapchain (d3d);
 
 	while (shaderon > 0) {
-		shaders[SHADER_POST].type = SHADERTYPE_POST;
-		if (!psEffect_LoadEffect (psEnabled ? _T("_winuae.fx") : _T("_winuae_old.fx"), false, &shaders[SHADER_POST], -1)) {
+		d3d->shaders[SHADER_POST].type = SHADERTYPE_POST;
+		if (!psEffect_LoadEffect (d3d, d3d->psEnabled ? _T("_winuae.fx") : _T("_winuae_old.fx"), false, &d3d->shaders[SHADER_POST], -1)) {
 			shaderon = 0;
 			break;
 		}
 		for (int i = 0; i < MAX_FILTERSHADERS; i++) {
-			if (filterd3d->gfx_filtershader[i][0]) {
-				struct shaderdata *s = allocshaderslot (SHADERTYPE_BEFORE);
-				if (!psEffect_LoadEffect (filterd3d->gfx_filtershader[i], true, s, i)) {
-					filterd3d->gfx_filtershader[i][0] = changed_prefs.gf[filterd3didx].gfx_filtershader[i][0] = 0;
+			if (d3d->filterd3d->gfx_filtershader[i][0]) {
+				struct shaderdata *s = allocshaderslot (d3d, SHADERTYPE_BEFORE);
+				if (!psEffect_LoadEffect (d3d, d3d->filterd3d->gfx_filtershader[i], true, s, i)) {
+					d3d->filterd3d->gfx_filtershader[i][0] = changed_prefs.gf[d3d->filterd3didx].gfx_filtershader[i][0] = 0;
 					break;
 				}
 			}
-			if (filterd3d->gfx_filtermask[i][0]) {
-				struct shaderdata *s = allocshaderslot (SHADERTYPE_MASK_BEFORE);
-				createmasktexture (filterd3d->gfx_filtermask[i], s);
+			if (d3d->filterd3d->gfx_filtermask[i][0]) {
+				struct shaderdata *s = allocshaderslot (d3d, SHADERTYPE_MASK_BEFORE);
+				createmasktexture (d3d, d3d->filterd3d->gfx_filtermask[i], s);
 			}
 		}
-		if (filterd3d->gfx_filtershader[2 * MAX_FILTERSHADERS][0]) {
-			struct shaderdata *s = allocshaderslot (SHADERTYPE_MIDDLE);
-			if (!psEffect_LoadEffect (filterd3d->gfx_filtershader[2 * MAX_FILTERSHADERS], true, s, 2 * MAX_FILTERSHADERS)) {
-				filterd3d->gfx_filtershader[2 * MAX_FILTERSHADERS][0] = changed_prefs.gf[filterd3didx].gfx_filtershader[2 * MAX_FILTERSHADERS][0] = 0;
+		if (d3d->filterd3d->gfx_filtershader[2 * MAX_FILTERSHADERS][0]) {
+			struct shaderdata *s = allocshaderslot (d3d, SHADERTYPE_MIDDLE);
+			if (!psEffect_LoadEffect (d3d, d3d->filterd3d->gfx_filtershader[2 * MAX_FILTERSHADERS], true, s, 2 * MAX_FILTERSHADERS)) {
+				d3d->filterd3d->gfx_filtershader[2 * MAX_FILTERSHADERS][0] = changed_prefs.gf[d3d->filterd3didx].gfx_filtershader[2 * MAX_FILTERSHADERS][0] = 0;
 			}
 		}
-		if (filterd3d->gfx_filtermask[2 * MAX_FILTERSHADERS][0]) {
-			struct shaderdata *s = allocshaderslot (SHADERTYPE_MASK_AFTER);
-			createmasktexture (filterd3d->gfx_filtermask[2 * MAX_FILTERSHADERS], s);
+		if (d3d->filterd3d->gfx_filtermask[2 * MAX_FILTERSHADERS][0]) {
+			struct shaderdata *s = allocshaderslot (d3d, SHADERTYPE_MASK_MIDDLE);
+			createmasktexture (d3d, d3d->filterd3d->gfx_filtermask[2 * MAX_FILTERSHADERS], s);
 		}
 		for (int i = 0; i < MAX_FILTERSHADERS; i++) {
-			if (filterd3d->gfx_filtershader[i + MAX_FILTERSHADERS][0]) {
-				struct shaderdata *s = allocshaderslot (SHADERTYPE_AFTER);
-				if (!psEffect_LoadEffect (filterd3d->gfx_filtershader[i + MAX_FILTERSHADERS], true, s, i + MAX_FILTERSHADERS)) {
-					filterd3d->gfx_filtershader[i + MAX_FILTERSHADERS][0] = changed_prefs.gf[filterd3didx].gfx_filtershader[i + MAX_FILTERSHADERS][0] = 0;
+			if (d3d->filterd3d->gfx_filtershader[i + MAX_FILTERSHADERS][0]) {
+				struct shaderdata *s = allocshaderslot (d3d, SHADERTYPE_AFTER);
+				if (!psEffect_LoadEffect (d3d, d3d->filterd3d->gfx_filtershader[i + MAX_FILTERSHADERS], true, s, i + MAX_FILTERSHADERS)) {
+					d3d->filterd3d->gfx_filtershader[i + MAX_FILTERSHADERS][0] = changed_prefs.gf[d3d->filterd3didx].gfx_filtershader[i + MAX_FILTERSHADERS][0] = 0;
 					break;
 				}
 			}
-			if (filterd3d->gfx_filtermask[i + MAX_FILTERSHADERS][0]) {
-				struct shaderdata *s = allocshaderslot (SHADERTYPE_MASK_AFTER);
-				createmasktexture (filterd3d->gfx_filtermask[i + MAX_FILTERSHADERS], s);
+			if (d3d->filterd3d->gfx_filtermask[i + MAX_FILTERSHADERS][0]) {
+				struct shaderdata *s = allocshaderslot (d3d, SHADERTYPE_MASK_AFTER);
+				createmasktexture (d3d, d3d->filterd3d->gfx_filtermask[i + MAX_FILTERSHADERS], s);
 			}
 		}
-		if (filterd3d->gfx_filter_scanlines > 0) {
-			createsltexture ();
-			createscanlines (1);
-		}
 		break;
+	}
+	if (d3d->filterd3d->gfx_filter_scanlines > 0) {
+		createsltexture(d3d);
+		createscanlines(d3d, 1);
 	}
 	if (wasshader && !shaderon)
 		write_log (_T("Falling back to non-shader mode\n"));
 
-	createmask2texture (filterd3d->gfx_filteroverlay);
+	createmask2texture (d3d, d3d->filterd3d->gfx_filteroverlay);
 
-	createledtexture ();
+	createledtexture (d3d);
 
-	hr = D3DXCreateSprite (d3ddev, &sprite);
+	hr = D3DXCreateSprite (d3d->d3ddev, &d3d->sprite);
 	if (FAILED (hr)) {
 		write_log (_T("%s: D3DXSprite failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 	}
 
 	int curw = CURSORMAXWIDTH, curh = CURSORMAXHEIGHT;
-	cursorsurfaced3d = createtext (curw, curh, D3DFMT_A8R8G8B8);
-	cursor_v = false;
-	cursor_scale = false;
+	d3d->cursorsurfaced3d = createtext (d3d, curw, curh, D3DFMT_A8R8G8B8);
+	d3d->cursor_v = false;
+	d3d->cursor_scale = false;
 
 	vbsize = sizeof (struct TLVERTEX) * NUMVERTICES;
-	if (FAILED (hr = d3ddev->CreateVertexBuffer (vbsize, D3DUSAGE_WRITEONLY,
-		D3DFVF_TLVERTEX, D3DPOOL_DEFAULT, &vertexBuffer, NULL))) {
+	if (FAILED (hr = d3d->d3ddev->CreateVertexBuffer (vbsize, D3DUSAGE_WRITEONLY,
+		D3DFVF_TLVERTEX, D3DPOOL_DEFAULT, &d3d->vertexBuffer, NULL))) {
 			write_log (_T("%s: failed to create vertex buffer: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 			return 0;
 	}
-	createvertex ();
-	if (FAILED (hr = d3ddev->SetFVF (D3DFVF_TLVERTEX)))
+	createvertex (d3d);
+	if (FAILED (hr = d3d->d3ddev->SetFVF (D3DFVF_TLVERTEX)))
 		write_log (_T("%s: SetFVF failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
-	if (FAILED (hr = d3ddev->SetStreamSource (0, vertexBuffer, 0, sizeof (struct TLVERTEX))))
+	if (FAILED (hr = d3d->d3ddev->SetStreamSource (0, d3d->vertexBuffer, 0, sizeof (struct TLVERTEX))))
 		write_log (_T("%s: SetStreamSource failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 
-	hr = d3ddev->SetRenderState (D3DRS_CULLMODE, D3DCULL_NONE);
-	hr = d3ddev->SetRenderState (D3DRS_LIGHTING, FALSE);
+	hr = d3d->d3ddev->SetRenderState (D3DRS_CULLMODE, D3DCULL_NONE);
+	hr = d3d->d3ddev->SetRenderState (D3DRS_LIGHTING, FALSE);
 
-	settransform (NULL);
+	settransform (d3d, NULL);
 
 	return 1;
 }
 
-static void D3D_free2 (void)
+static void D3D_free2 (struct d3dstruct *d3d)
 {
-	invalidatedeviceobjects ();
-	if (d3ddev) {
-		d3ddev->Release ();
-		d3ddev = NULL;
+	invalidatedeviceobjects (d3d);
+	if (d3d->screenshotsurface)
+		d3d->screenshotsurface->Release();
+	d3d->screenshotsurface = NULL;
+	if (d3d->d3ddev) {
+		d3d->d3ddev->Release ();
+		d3d->d3ddev = NULL;
 	}
-	if (d3d) {
-		d3d->Release ();
-		d3d = NULL;
+	if (d3d->d3d) {
+		d3d->d3d->Release ();
+		d3d->d3d = NULL;
 	}
-	d3d_enabled = 0;
-	psActive = FALSE;
-	resetcount = 0;
-	devicelost = 0;
-	renderdisabled = false;
-	changed_prefs.leds_on_screen = currprefs.leds_on_screen = currprefs.leds_on_screen & ~STATUSLINE_TARGET;
+	d3d->d3d_enabled = 0;
+	d3d->psActive = FALSE;
+	d3d->resetcount = 0;
+	d3d->devicelost = 0;
+	d3d->renderdisabled = false;
+	for (int i = 0; i < LED_MAX; i++) {
+		leds[i] = 0;
+	}
+	changed_prefs.leds_on_screen &= ~STATUSLINE_TARGET;
+	currprefs.leds_on_screen &= ~STATUSLINE_TARGET;
 }
 
-void D3D_free (bool immediate)
+void xD3D_free (int monid, bool immediate)
 {
+	struct d3dstruct *d3d = &d3ddata[monid];
 	if (!fakemodewaitms || immediate) {
-		waitfakemode ();
-		D3D_free2 ();
-		ddraw_fs_hack_free ();
+		waitfakemode (d3d);
+		D3D_free2 (d3d);
+		ddraw_fs_hack_free (d3d);
 		return;
 	}
 }
 
 #define VBLANKDEBUG 0
 
-bool D3D_getvblankpos (int *vpos)
+static bool xD3D_getvblankpos (int *vpos)
 {
+	struct d3dstruct *d3d = &d3ddata[0];
 	HRESULT hr;
 	D3DRASTER_STATUS rt;
 #if VBLANKDEBUG
@@ -2205,18 +2631,18 @@ bool D3D_getvblankpos (int *vpos)
 	static BOOL lastinvblank;
 #endif
 	*vpos = -2;
-	if (!isd3d ())
+	if (!isd3d (d3d))
 		return false;
-	if (d3dswapchain)
-		hr = d3dswapchain->GetRasterStatus (&rt);
+	if (d3d->d3dswapchain)
+		hr = d3d->d3dswapchain->GetRasterStatus (&rt);
 	else
-		hr = d3ddev->GetRasterStatus (0, &rt);
+		hr = d3d->d3ddev->GetRasterStatus (0, &rt);
 	if (FAILED (hr)) {
 		write_log (_T("%s: GetRasterStatus %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		return false;
 	}
-	if (rt.ScanLine > maxscanline)
-		maxscanline = rt.ScanLine;
+	if (rt.ScanLine > d3d->maxscanline)
+		d3d->maxscanline = rt.ScanLine;
 	*vpos = rt.ScanLine;
 #if VBLANKDEBUG
 	if (lastline != rt.ScanLine || lastinvblank != rt.InVBlank) {
@@ -2230,16 +2656,17 @@ bool D3D_getvblankpos (int *vpos)
 	return true;
 }
 
-void D3D_vblank_reset (double freq)
+static void xD3D_vblank_reset (double freq)
 {
-	if (!isd3d ())
+	struct d3dstruct *d3d = &d3ddata[0];
+	if (!isd3d (d3d))
 		return;
 }
 
-static int getd3dadapter (IDirect3D9 *d3d)
+static int getd3dadapter (IDirect3D9 *id3d)
 {
-	struct MultiDisplay *md = getdisplay (&currprefs);
-	int num = d3d->GetAdapterCount ();
+	struct MultiDisplay *md = getdisplay(&currprefs, 0);
+	int num = id3d->GetAdapterCount ();
 	HMONITOR winmon;
 	POINT pt;
 
@@ -2247,18 +2674,20 @@ static int getd3dadapter (IDirect3D9 *d3d)
 	pt.y = (md->rect.bottom - md->rect.top) / 2 + md->rect.top;
 	winmon = MonitorFromPoint (pt, MONITOR_DEFAULTTONEAREST);
 	for (int i = 0; i < num; i++) {
-		HMONITOR d3dmon = d3d->GetAdapterMonitor (i);
+		HMONITOR d3dmon = id3d->GetAdapterMonitor (i);
 		if (d3dmon == winmon)
 			return i;
 	}
 	return D3DADAPTER_DEFAULT;
 }
 
-static const TCHAR *D3D_init2 (HWND ahwnd, int w_w, int w_h, int depth, int *freq, int mmult)
+static const TCHAR *D3D_init2 (struct d3dstruct *d3d, HWND ahwnd, int w_w, int w_h, int depth, int *freq, int mmulth, int mmultv)
 {
+	int monid = d3d - d3ddata;
+	struct amigadisplay *ad = &adisplays[monid];
 	HRESULT ret, hr;
-	static TCHAR errmsg[100] = { 0 };
-	D3DDISPLAYMODE mode;
+	static TCHAR errmsg[300] = { 0 };
+	D3DDISPLAYMODE mode = { 0 };
 	D3DCAPS9 d3dCaps;
 	int adapter;
 	DWORD flags;
@@ -2266,20 +2695,21 @@ static const TCHAR *D3D_init2 (HWND ahwnd, int w_w, int w_h, int depth, int *fre
 	typedef HRESULT (WINAPI *LPDIRECT3DCREATE9EX)(UINT, IDirect3D9Ex**);
 	LPDIRECT3DCREATE9EX d3dexp = NULL;
 	int vsync = isvsync ();
-	struct apmode *ap = picasso_on ? &currprefs.gfx_apmode[APMODE_RTG] : &currprefs.gfx_apmode[APMODE_NATIVE];
+	struct apmode *apm = ad->picasso_on ? &currprefs.gfx_apmode[APMODE_RTG] : &currprefs.gfx_apmode[APMODE_NATIVE];
+	struct apmode ap;
 	D3DADAPTER_IDENTIFIER9 did;
 
-	filterd3didx = picasso_on;
-	filterd3d = &currprefs.gf[filterd3didx];
+	d3d->filterd3didx = ad->picasso_on;
+	d3d->filterd3d = &currprefs.gf[d3d->filterd3didx];
 
-	D3D_free2 ();
+	D3D_free2 (d3d);
 	if (!currprefs.gfx_api) {
 		_tcscpy (errmsg, _T("D3D: not enabled"));
 		return errmsg;
 	}
 
-	xfree (fakebitmap);
-	fakebitmap = xmalloc (uae_u8, w_w * depth);
+	xfree (d3d->fakebitmap);
+	d3d->fakebitmap = xmalloc (uae_u8, w_w * depth);
 
 	d3dx = LoadLibrary (D3DX9DLL);
 	if (d3dx == NULL) {
@@ -2287,10 +2717,10 @@ static const TCHAR *D3D_init2 (HWND ahwnd, int w_w, int w_h, int depth, int *fre
 		if (!warned) {
 			if (os_vista)
 				_tcscpy(errmsg, _T("Direct3D: Optional DirectX9 components are not installed.\n")
-					_T("\nhttp://go.microsoft.com/fwlink/?linkid=56513"));
+					_T("\nhttps://www.microsoft.com/en-us/download/details.aspx?id=8109"));
 			else
 				_tcscpy (errmsg, _T("Direct3D: Newer DirectX Runtime required or optional DirectX9 components are not installed.\n")
-					_T("\nhttp://go.microsoft.com/fwlink/?linkid=56513"));
+					_T("\nhttps://www.microsoft.com/en-us/download/details.aspx?id=8109"));
 			warned = true;
 		}
 		return errmsg;
@@ -2300,7 +2730,7 @@ static const TCHAR *D3D_init2 (HWND ahwnd, int w_w, int w_h, int depth, int *fre
 	D3D_goodenough ();
 	D3D_canshaders ();
 
-	d3d_ex = FALSE;
+	d3d->d3d_ex = FALSE;
 	d3dDLL = LoadLibrary (_T("D3D9.DLL"));
 	if (d3dDLL == NULL) {
 		_tcscpy (errmsg, _T("Direct3D: DirectX 9 or newer required"));
@@ -2308,106 +2738,135 @@ static const TCHAR *D3D_init2 (HWND ahwnd, int w_w, int w_h, int depth, int *fre
 	} else {
 		d3dexp  = (LPDIRECT3DCREATE9EX)GetProcAddress (d3dDLL, "Direct3DCreate9Ex");
 		if (d3dexp)
-			d3d_ex = TRUE;
+			d3d->d3d_ex = TRUE;
 	}
 	FreeLibrary (d3dDLL);
 	hr = -1;
-	if (d3d_ex && D3DEX) {
-		hr = d3dexp (D3D_SDK_VERSION, &d3dex);
+	if (d3d->d3d_ex && D3DEX) {
+		hr = d3dexp (D3D_SDK_VERSION, &d3d->d3dex);
 		if (FAILED (hr))
 			write_log (_T("Direct3D: failed to create D3DEx object: %s\n"), D3D_ErrorString (hr));
-		d3d = (IDirect3D9*)d3dex;
+		d3d->d3d = (IDirect3D9*)d3d->d3dex;
 	}
 	if (FAILED (hr)) {
-		d3d_ex = 0;
-		d3dex = NULL;
-		d3d = Direct3DCreate9 (D3D_SDK_VERSION);
-		if (d3d == NULL) {
-			D3D_free (true);
+		d3d->d3d_ex = 0;
+		d3d->d3dex = NULL;
+		d3d->d3d = Direct3DCreate9 (D3D_SDK_VERSION);
+		if (d3d->d3d == NULL) {
+			D3D_free(monid, true);
 			_tcscpy (errmsg, _T("Direct3D: failed to create D3D object"));
 			return errmsg;
 		}
 	}
-	if (d3d_ex)
+	if (d3d->d3d_ex)
 		D3DHEAD = _T("D3D9Ex");
 	else
 		D3DHEAD = _T("D3D9");
 
+	memcpy(&ap, apm, sizeof ap);
 
-	adapter = getd3dadapter (d3d);
-
-	modeex.Size = sizeof modeex;
-	if (d3dex && D3DEX) {
-		LUID luid;
-		hr = d3dex->GetAdapterLUID (adapter, &luid);
-		hr = d3dex->GetAdapterDisplayModeEx (adapter, &modeex, NULL);
+	if (os_dwm_enabled && isfullscreen() <= 0 && apm->gfx_backbuffers > 1 && !apm->gfx_vsync) {
+		write_log(_T("Switch from triple buffer to double buffer (%d).\n"), apm->gfx_vflip);
+		ap.gfx_vflip = 0;
+		ap.gfx_backbuffers = 1;
 	}
-	if (FAILED (hr = d3d->GetAdapterDisplayMode (adapter, &mode)))
+
+	adapter = getd3dadapter (d3d->d3d);
+
+	d3d->modeex.Size = sizeof d3d->modeex;
+	if (d3d->d3dex && D3DEX) {
+		LUID luid;
+		hr = d3d->d3dex->GetAdapterLUID (adapter, &luid);
+		hr = d3d->d3dex->GetAdapterDisplayModeEx (adapter, &d3d->modeex, NULL);
+	}
+	if (FAILED (hr = d3d->d3d->GetAdapterDisplayMode (adapter, &mode)))
 		write_log (_T("%s: GetAdapterDisplayMode failed %s\n"), D3DHEAD, D3D_ErrorString (hr));
-	if (FAILED (hr = d3d->GetDeviceCaps (adapter, D3DDEVTYPE_HAL, &d3dCaps)))
+	if (FAILED (hr = d3d->d3d->GetDeviceCaps (adapter, D3DDEVTYPE_HAL, &d3dCaps)))
 		write_log (_T("%s: GetDeviceCaps failed %s\n"), D3DHEAD, D3D_ErrorString (hr));
-	if (SUCCEEDED (hr = d3d->GetAdapterIdentifier (adapter, 0, &did))) {
+	if (SUCCEEDED (hr = d3d->d3d->GetAdapterIdentifier (adapter, 0, &did))) {
 		TCHAR *s = au (did.Description);
 		write_log (_T("Device name: '%s' %llx.%x\n"), s, did.DriverVersion, did.Revision);
 		xfree (s);
 	}
 
-	memset (&dpp, 0, sizeof (dpp));
-	dpp.Windowed = isfullscreen () <= 0;
-	dpp.BackBufferFormat = mode.Format;
-	dpp.BackBufferCount = ap->gfx_backbuffers;
-	dpp.SwapEffect = D3DSWAPEFFECT_DISCARD;
-	dpp.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
-	dpp.BackBufferWidth = w_w;
-	dpp.BackBufferHeight = w_h;
-	dpp.PresentationInterval = !ap->gfx_vflip ? D3DPRESENT_INTERVAL_IMMEDIATE : D3DPRESENT_INTERVAL_ONE;
+	d3d->variablerefresh = false;
+	cannoclear = ap.gfx_vsyncmode != 0;
 
-	modeex.Width = w_w;
-	modeex.Height = w_h;
-	modeex.RefreshRate = 0;
-	modeex.ScanLineOrdering = ap->gfx_interlaced ? D3DSCANLINEORDERING_INTERLACED : D3DSCANLINEORDERING_PROGRESSIVE;
-	modeex.Format = mode.Format;
+	memset (&d3d->dpp, 0, sizeof (d3d->dpp));
+	d3d->dpp.Windowed = isfullscreen () <= 0;
+	d3d->dpp.BackBufferFormat = mode.Format;
+	d3d->dpp.BackBufferCount = ap.gfx_backbuffers;
+	d3d->dpp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+	d3d->dpp.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+	d3d->dpp.BackBufferWidth = w_w;
+	d3d->dpp.BackBufferHeight = w_h;
+	d3d->dpp.PresentationInterval = d3d->variablerefresh ? D3DPRESENT_INTERVAL_DEFAULT : ((!ap.gfx_vflip || monid) ? D3DPRESENT_INTERVAL_IMMEDIATE : D3DPRESENT_INTERVAL_ONE);
 
-	vsync2 = 0;
+	d3d->modeex.Width = w_w;
+	d3d->modeex.Height = w_h;
+	d3d->modeex.RefreshRate = 0;
+	d3d->modeex.ScanLineOrdering = ap.gfx_interlaced ? D3DSCANLINEORDERING_INTERLACED : D3DSCANLINEORDERING_PROGRESSIVE;
+	d3d->modeex.Format = mode.Format;
+
+	d3d->vsync2 = 0;
 	int hzmult = 0;
 	if (isfullscreen () > 0) {
-		dpp.FullScreen_RefreshRateInHz = getrefreshrate (modeex.Width, modeex.Height);
-		modeex.RefreshRate = dpp.FullScreen_RefreshRateInHz;
+		d3d->dpp.FullScreen_RefreshRateInHz = getrefreshrate(monid, d3d->modeex.Width, d3d->modeex.Height);
+		d3d->modeex.RefreshRate = d3d->dpp.FullScreen_RefreshRateInHz;
 		if (vsync > 0) {
-			dpp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
-			getvsyncrate (dpp.FullScreen_RefreshRateInHz, &hzmult);
+			d3d->dpp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+			getvsyncrate(monid, d3d->dpp.FullScreen_RefreshRateInHz, &hzmult);
 			if (hzmult < 0) {
-				if (!ap->gfx_strobo) {
+				if (!ap.gfx_strobo) {
 					if (d3dCaps.PresentationIntervals & D3DPRESENT_INTERVAL_TWO)
-						dpp.PresentationInterval = D3DPRESENT_INTERVAL_TWO;
+						d3d->dpp.PresentationInterval = D3DPRESENT_INTERVAL_TWO;
 				}  else {
-					vsync2 = -2;
+					d3d->vsync2 = -2;
 				}
 			} else if (hzmult > 0) {
-				vsync2 = 1;
+				d3d->vsync2 = 1;
 			}
 		}
-		*freq = modeex.RefreshRate;
+		*freq = d3d->modeex.RefreshRate;
+	} else {
+		if (mode.RefreshRate > 0) {
+			if (vsync > 0) {
+				d3d->dpp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+				getvsyncrate(monid, mode.RefreshRate, &hzmult);
+				if (hzmult < 0) {
+					if (!ap.gfx_strobo) {
+						if ((d3dCaps.PresentationIntervals & D3DPRESENT_INTERVAL_TWO) && isfullscreen() > 0)
+							d3d->dpp.PresentationInterval = D3DPRESENT_INTERVAL_TWO;
+					} else {
+						d3d->vsync2 = -2;
+					}
+				} else if (hzmult > 0) {
+					d3d->vsync2 = 1;
+				}
+			}
+			*freq = mode.RefreshRate;
+		}
 	}
+
 	if (vsync < 0) {
-		vsync2 = 0;
-		getvsyncrate (dpp.FullScreen_RefreshRateInHz, &hzmult);
+		d3d->vsync2 = 0;
+		getvsyncrate(monid, isfullscreen() > 0 ? d3d->dpp.FullScreen_RefreshRateInHz : mode.RefreshRate, &hzmult);
 		if (hzmult > 0) {
-			vsync2 = 1;
+			d3d->vsync2 = 1;
 		} else if (hzmult < 0) {
-			if (ap->gfx_strobo) {
-				vsync2 = -2;
-			} else if (ap->gfx_vflip) {
-				if (d3dCaps.PresentationIntervals & D3DPRESENT_INTERVAL_TWO)
-					dpp.PresentationInterval = D3DPRESENT_INTERVAL_TWO;
+			if (ap.gfx_strobo) {
+				d3d->vsync2 = -2;
+			} else if (ap.gfx_vflip) {
+				if ((d3dCaps.PresentationIntervals & D3DPRESENT_INTERVAL_TWO) && isfullscreen() > 0)
+					d3d->dpp.PresentationInterval = D3DPRESENT_INTERVAL_TWO;
 				else
-					vsync2 = -1;
+					d3d->vsync2 = -1;
 			}
 		}
 	}
 
-	d3dhwnd = ahwnd;
-	t_depth = depth;
+	d3d->d3dhwnd = ahwnd;
+	d3d->t_depth = depth;
 
 	flags = D3DCREATE_FPU_PRESERVE | D3DCREATE_MULTITHREADED;
 	// Check if hardware vertex processing is available
@@ -2416,174 +2875,190 @@ static const TCHAR *D3D_init2 (HWND ahwnd, int w_w, int w_h, int depth, int *fre
 	} else {
 		flags |= D3DCREATE_SOFTWARE_VERTEXPROCESSING;
 	}
-	if (d3d_ex && D3DEX) {
-		ret = d3dex->CreateDeviceEx (adapter, D3DDEVTYPE_HAL, d3dhwnd, flags, &dpp, dpp.Windowed ? NULL : &modeex, &d3ddevex);
-		d3ddev = d3ddevex;
+	if (d3d->d3d_ex && D3DEX) {
+		ret = d3d->d3dex->CreateDeviceEx (adapter, D3DDEVTYPE_HAL, d3d->d3dhwnd, flags, &d3d->dpp, d3d->dpp.Windowed ? NULL : &d3d->modeex, &d3d->d3ddevex);
+		d3d->d3ddev = d3d->d3ddevex;
 	} else {
-		ret = d3d->CreateDevice (adapter, D3DDEVTYPE_HAL, d3dhwnd, flags, &dpp, &d3ddev);
+		ret = d3d->d3d->CreateDevice (adapter, D3DDEVTYPE_HAL, d3d->d3dhwnd, flags, &d3d->dpp, &d3d->d3ddev);
 	}
 	if (FAILED (ret) && (flags & D3DCREATE_PUREDEVICE)) {
 		flags &= ~D3DCREATE_PUREDEVICE;
-		if (d3d_ex && D3DEX) {
-			ret = d3dex->CreateDeviceEx (adapter, D3DDEVTYPE_HAL, d3dhwnd, flags, &dpp, dpp.Windowed ? NULL : &modeex, &d3ddevex);
-			d3ddev = d3ddevex;
+		if (d3d->d3d_ex && D3DEX) {
+			ret = d3d->d3dex->CreateDeviceEx (adapter, D3DDEVTYPE_HAL, d3d->d3dhwnd, flags, &d3d->dpp, d3d->dpp.Windowed ? NULL : &d3d->modeex, &d3d->d3ddevex);
+			d3d->d3ddev = d3d->d3ddevex;
 		} else {
-			ret = d3d->CreateDevice (adapter, D3DDEVTYPE_HAL, d3dhwnd, flags, &dpp, &d3ddev);
+			ret = d3d->d3d->CreateDevice (adapter, D3DDEVTYPE_HAL, d3d->d3dhwnd, flags, &d3d->dpp, &d3d->d3ddev);
 		}
 		if (FAILED (ret) && (flags & D3DCREATE_HARDWARE_VERTEXPROCESSING)) {
 			flags &= ~D3DCREATE_HARDWARE_VERTEXPROCESSING;
 			flags |= D3DCREATE_SOFTWARE_VERTEXPROCESSING;
-			if (d3d_ex && D3DEX) {
-				ret = d3dex->CreateDeviceEx (adapter, D3DDEVTYPE_HAL, d3dhwnd, flags, &dpp, dpp.Windowed ? NULL : &modeex, &d3ddevex);
-				d3ddev = d3ddevex;
+			if (d3d->d3d_ex && D3DEX) {
+				ret = d3d->d3dex->CreateDeviceEx (adapter, D3DDEVTYPE_HAL, d3d->d3dhwnd, flags, &d3d->dpp, d3d->dpp.Windowed ? NULL : &d3d->modeex, &d3d->d3ddevex);
+				d3d->d3ddev = d3d->d3ddevex;
 			} else {
-				ret = d3d->CreateDevice (adapter, D3DDEVTYPE_HAL, d3dhwnd, flags, &dpp, &d3ddev);
+				ret = d3d->d3d->CreateDevice (adapter, D3DDEVTYPE_HAL, d3d->d3dhwnd, flags, &d3d->dpp, &d3d->d3ddev);
 			}
 		}
 	}
 
 	if (FAILED (ret)) {
-		_stprintf (errmsg, _T("%s failed, %s\n"), d3d_ex && D3DEX ? _T("CreateDeviceEx") : _T("CreateDevice"), D3D_ErrorString (ret));
-		if (ret == D3DERR_INVALIDCALL && dpp.Windowed == 0 && dpp.FullScreen_RefreshRateInHz && !ddraw_fs) {
+		_stprintf (errmsg, _T("%s failed, %s\n"), d3d->d3d_ex && D3DEX ? _T("CreateDeviceEx") : _T("CreateDevice"), D3D_ErrorString (ret));
+		if (ret == D3DERR_INVALIDCALL && d3d->dpp.Windowed == 0 && d3d->dpp.FullScreen_RefreshRateInHz && !d3d->ddraw_fs) {
 			write_log (_T("%s\n"), errmsg);
 			write_log (_T("%s: Retrying fullscreen with DirectDraw\n"), D3DHEAD);
-			if (ddraw_fs_hack_init ()) {
-				const TCHAR *err2 = D3D_init (ahwnd, w_w, w_h, depth, freq, mmult);
+			if (ddraw_fs_hack_init (d3d)) {
+				const TCHAR *err2 = D3D_init (ahwnd, monid, w_w, w_h, depth, freq, mmulth, mmultv);
 				if (err2)
-					ddraw_fs_hack_free ();
+					ddraw_fs_hack_free (d3d);
 				return err2;
 			}
 		}
-		if (d3d_ex && D3DEX) {
+		if (d3d->d3d_ex && D3DEX) {
 			write_log (_T("%s\n"), errmsg);
 			D3DEX = 0;
-			return D3D_init (ahwnd, w_w, w_h, depth, freq, mmult);
+			return D3D_init(ahwnd, monid, w_w, w_h, depth, freq, mmulth, mmultv);
 		}
-		D3D_free (true);
+		D3D_free(monid, true);
 		return errmsg;
 	}
 
 	if (d3dCaps.PixelShaderVersion >= D3DPS_VERSION(2, 0))
-		psEnabled = TRUE;
+		d3d->psEnabled = TRUE;
 	else
-		psEnabled = FALSE;
+		d3d->psEnabled = FALSE;
 
-	max_texture_w = d3dCaps.MaxTextureWidth;
-	max_texture_h = d3dCaps.MaxTextureHeight;
+	d3d->max_texture_w = d3dCaps.MaxTextureWidth;
+	d3d->max_texture_h = d3dCaps.MaxTextureHeight;
 
-	write_log (_T("%s: %08X "), D3DHEAD, flags, d3dCaps.Caps, d3dCaps.Caps2, d3dCaps.Caps3);
+	write_log (_T("%s: %08X %08X %08X %08X"), D3DHEAD, flags, d3dCaps.Caps, d3dCaps.Caps2, d3dCaps.Caps3);
 	if (d3dCaps.TextureCaps & D3DPTEXTURECAPS_SQUAREONLY)
-		write_log (_T("SQUAREONLY "));
+		write_log (_T(" SQUAREONLY"));
 	if (d3dCaps.TextureCaps & D3DPTEXTURECAPS_POW2)
-		write_log (_T("POW2 "));
+		write_log (_T(" POW2"));
 	if (d3dCaps.TextureCaps & D3DPTEXTURECAPS_NONPOW2CONDITIONAL)
-		write_log (_T("NPOTCONDITIONAL "));
+		write_log (_T(" NPOTCONDITIONAL"));
 	if (d3dCaps.TextureCaps & D3DPTEXTURECAPS_ALPHA)
-		write_log (_T("ALPHA "));
+		write_log (_T(" ALPHA"));
 	if (d3dCaps.Caps2 & D3DCAPS2_DYNAMICTEXTURES)
-		write_log (_T("DYNAMIC "));
+		write_log (_T(" DYNAMIC"));
 	if (d3dCaps.Caps & D3DCAPS_READ_SCANLINE)
-		write_log (_T("SCANLINE "));
+		write_log (_T(" SCANLINE"));
 	
 	write_log (_T("\n"));
 
-	write_log (_T("%s: PS=%d.%d VS=%d.%d %d*%d*%d%s%s VS=%d B=%d%s %d-bit %d\n"),
+	write_log (_T("%s: PS=%d.%d VS=%d.%d %d*%d*%d%s%s VS=%d B=%d%s %d-bit %d (%dx%d)\n"),
 		D3DHEAD,
 		(d3dCaps.PixelShaderVersion >> 8) & 0xff, d3dCaps.PixelShaderVersion & 0xff,
 		(d3dCaps.VertexShaderVersion >> 8) & 0xff, d3dCaps.VertexShaderVersion & 0xff,
-		modeex.Width, modeex.Height,
-		dpp.FullScreen_RefreshRateInHz,
-		ap->gfx_interlaced ? _T("i") : _T("p"),
-		dpp.Windowed ? _T("") : _T(" FS"),
-		vsync, ap->gfx_backbuffers,
-		ap->gfx_vflip < 0 ? _T("WE") : (ap->gfx_vflip > 0 ? _T("WS") :  _T("I")), 
-		t_depth, adapter
+		d3d->modeex.Width, d3d->modeex.Height,
+		d3d->dpp.FullScreen_RefreshRateInHz,
+		ap.gfx_interlaced ? _T("i") : _T("p"),
+		d3d->dpp.Windowed ? _T("") : _T(" FS"),
+		vsync, ap.gfx_backbuffers,
+		ap.gfx_vflip < 0 ? _T("WE") : (ap.gfx_vflip > 0 ? _T("WS") :  _T("I")), 
+		d3d->t_depth, adapter,
+		d3d->max_texture_w, d3d->max_texture_h
 	);
 
-	if ((d3dCaps.PixelShaderVersion < D3DPS_VERSION(2,0) || !psEnabled || max_texture_w < 2048 || max_texture_h < 2048 || (!shaderon && SHADER > 0)) && d3d_ex) {
+#if 0
+	if ((d3dCaps.PixelShaderVersion < D3DPS_VERSION(2,0) || !d3d->psEnabled || d3d->max_texture_w < 2048 || d3d->max_texture_h < 2048 || (!shaderon && SHADER > 0)) && d3d->d3d_ex) {
 		D3DEX = 0;
 		write_log (_T("Disabling D3D9Ex\n"));
-		if (d3ddev) {
-			d3ddev->Release ();
-			d3ddev = NULL;
+		if (d3d->d3ddev) {
+			d3d->d3ddev->Release ();
+			d3d->d3ddev = NULL;
 		}
-		if (d3d) {
-			d3d->Release ();
-			d3d = NULL;
+		if (d3d->d3d) {
+			d3d->d3d->Release ();
+			d3d->d3d = NULL;
 		}
-		d3ddevex = NULL;
+		d3d->d3ddevex = NULL;
 		return D3D_init (ahwnd, w_w, w_h, depth, freq, mmult);
 	}
+#endif
+
 	if (!shaderon)
 		write_log (_T("Using non-shader version\n"));
 
-	dmultx = mmult;
-	dmult = S2X_getmult ();
+	d3d->dmultxh = mmulth;
+	d3d->dmultxv = mmultv;
+	d3d->dmult = S2X_getmult(d3d - d3ddata);
 
-	window_w = w_w;
-	window_h = w_h;
+	d3d->window_w = w_w;
+	d3d->window_h = w_h;
 
-	if (max_texture_w < w_w  || max_texture_h < w_h) {
+	if (d3d->max_texture_w < w_w  || d3d->max_texture_h < w_h) {
 		_stprintf (errmsg, _T("%s: %d * %d or bigger texture support required\nYour card's maximum texture size is only %d * %d"),
-			D3DHEAD, w_w, w_h, max_texture_w, max_texture_h);
+			D3DHEAD, w_w, w_h, d3d->max_texture_w, d3d->max_texture_h);
 		return errmsg;
 	}
-	while (dmultx > 1 && (w_w * dmultx > max_texture_w || w_h * dmultx > max_texture_h))
-		dmultx--;
+	while (d3d->dmultxh > 1 && w_w * d3d->dmultxh > d3d->max_texture_w)
+		d3d->dmultxh--;
+	while (d3d->dmultxv > 1 && w_h * d3d->dmultxv > d3d->max_texture_h)
+		d3d->dmultxv--;
 
-	required_sl_texture_w = w_w;
-	required_sl_texture_h = w_h;
-	if (filterd3d->gfx_filter_scanlines > 0 && (max_texture_w < w_w || max_texture_h < w_h)) {
+	d3d->required_sl_texture_w = w_w;
+	d3d->required_sl_texture_h = w_h;
+	if (d3d->filterd3d->gfx_filter_scanlines > 0 && (d3d->max_texture_w < w_w || d3d->max_texture_h < w_h)) {
 		gui_message (_T("%s: %d * %d or bigger texture support required for scanlines (max is only %d * %d)\n"),
 			D3DHEAD, _T("Scanlines disabled."),
-			required_sl_texture_w, required_sl_texture_h, max_texture_w, max_texture_h);
-		changed_prefs.gf[filterd3didx].gfx_filter_scanlines = filterd3d->gfx_filter_scanlines = 0;
+			d3d->required_sl_texture_w, d3d->required_sl_texture_h, d3d->max_texture_w, d3d->max_texture_h);
+		changed_prefs.gf[d3d->filterd3didx].gfx_filter_scanlines = d3d->filterd3d->gfx_filter_scanlines = 0;
 	}
 
 	switch (depth)
 	{
 		case 32:
 		default:
-			tformat = D3DFMT_X8R8G8B8;
+			d3d->tformat = D3DFMT_X8R8G8B8;
 		break;
 		case 15:
-			tformat = D3DFMT_X1R5G5B5;
+			d3d->tformat = D3DFMT_X1R5G5B5;
 		break;
 		case 16:
-			tformat = D3DFMT_R5G6B5;
+			d3d->tformat = D3DFMT_R5G6B5;
 		break;
 	}
 
-	changed_prefs.leds_on_screen = currprefs.leds_on_screen = currprefs.leds_on_screen | STATUSLINE_TARGET;
+	changed_prefs.leds_on_screen |= STATUSLINE_TARGET;
+	currprefs.leds_on_screen |= STATUSLINE_TARGET;
 
-	if (!restoredeviceobjects ()) {
-		D3D_free (true);
+	if (!restoredeviceobjects (d3d)) {
+		D3D_free(monid, true);
 		_stprintf (errmsg, _T("%s: initialization failed."), D3DHEAD);
 		return errmsg;
 	}
-	maxscanline = 0;
-	d3d_enabled = 1;
-	wasstilldrawing_broken = true;
+	d3d->maxscanline = 0;
+	d3d->d3d_enabled = 1;
+	d3d->wasstilldrawing_broken = true;
 
-	if (vsync < 0 && ap->gfx_vflip == 0) {
-		hr = d3ddev->CreateQuery(D3DQUERYTYPE_EVENT, &query);
+	if ((vsync < 0 || d3d->variablerefresh) && ap.gfx_vflip == 0) {
+		hr = d3d->d3ddev->CreateQuery(D3DQUERYTYPE_EVENT, &d3d->query);
 		if (FAILED (hr))
 			write_log (_T("%s: CreateQuery(D3DQUERYTYPE_EVENT) failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 	}
-	if (d3ddevex) {
+	if (d3d->d3ddevex) {
 		UINT v = 12345;
-		hr = d3ddevex->GetMaximumFrameLatency (&v);
+		hr = d3d->d3ddevex->GetMaximumFrameLatency (&v);
 		if (FAILED (hr)) {
 			write_log (_T("%s: GetMaximumFrameLatency() failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 			v = 1;
 		}
 		hr = S_OK;
-		if (forcedframelatency >= 0)
-			hr = d3ddevex->SetMaximumFrameLatency (forcedframelatency);
-		else if (dpp.PresentationInterval == D3DPRESENT_INTERVAL_IMMEDIATE && (v > 1 || !vsync))
-			hr = d3ddevex->SetMaximumFrameLatency (vsync ? (hzmult < 0 ? 2 : 1) : 0);
+		if (forcedframelatency >= 0) {
+			hr = d3d->d3ddevex->SetMaximumFrameLatency(forcedframelatency);
+		} else if (ap.gfx_vsyncmode) {
+			hr = d3d->d3ddevex->SetMaximumFrameLatency(1);
+		} else if (d3d->dpp.PresentationInterval == D3DPRESENT_INTERVAL_IMMEDIATE && (v > 1 || !vsync)) {
+			hr = d3d->d3ddevex->SetMaximumFrameLatency((vsync || d3d->variablerefresh) ? (hzmult < 0 && !ap.gfx_strobo && !d3d->variablerefresh ? 2 : 1) : 0);
+		}
 		if (FAILED (hr))
 			write_log (_T("%s: SetMaximumFrameLatency() failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
+	}
+
+	hr = d3d->d3ddev->CreateOffscreenPlainSurface(w_w, w_h, d3d->tformat, D3DPOOL_SYSTEMMEM, &d3d->screenshotsurface, NULL);
+	if (FAILED(hr)) {
+		write_log(_T("%s: CreateOffscreenPlainSurface RT failed: %s\n"), D3DHEAD, D3D_ErrorString(hr));
 	}
 
 	return 0;
@@ -2595,22 +3070,23 @@ struct d3d_initargs
 	int w;
 	int h;
 	int depth;
-	int mmult;
+	int mmulth, mmultv;
 	int *freq;
 };
 static struct d3d_initargs d3dargs;
 
 static void *D3D_init_start (void *p)
 {
+	struct d3dstruct *d3d = &d3ddata[0];
 	struct timeval tv1, tv2;
 
 	gettimeofday (&tv1, NULL);
 	sleep_millis (1000);
 	write_log (_T("Threaded D3D_init() start (free)\n"));
-	D3D_free2 ();
+	D3D_free2 (d3d);
 	sleep_millis (1000);
 	write_log (_T("Threaded D3D_init() start (init)\n"));
-	const TCHAR *t = D3D_init2 (d3dargs.hwnd, d3dargs.w, d3dargs.h, d3dargs.depth, d3dargs.freq, d3dargs.mmult);
+	const TCHAR *t = D3D_init2 (d3d, d3dargs.hwnd, d3dargs.w, d3dargs.h,d3dargs.depth, d3dargs.freq, d3dargs.mmulth, d3dargs.mmultv);
 	if (t) {
 		gui_message (_T("Threaded D3D_init() returned error '%s'\n"), t);
 	}
@@ -2626,155 +3102,162 @@ static void *D3D_init_start (void *p)
 		sleep_millis (10);
 	}
 	write_log (_T("Threaded D3D_init() finished\n"));
-	frames_since_init = 0;
-	fakemode = false;
+	d3d->frames_since_init = 0;
+	d3d->fakemode = false;
 	return NULL;
 }
 
-const TCHAR *D3D_init (HWND ahwnd, int w_w, int w_h, int depth, int *freq, int mmult)
+static const TCHAR *xD3D_init (HWND ahwnd, int monid, int w_w, int w_h, int depth, int *freq, int mmulth, int mmultv)
 {
+	struct d3dstruct *d3d = &d3ddata[monid];
+
 	if (!fakemodewaitms)
-		return D3D_init2 (ahwnd, w_w, w_h, depth, freq, mmult);
-	fakemode = true;
+		return D3D_init2 (d3d, ahwnd, w_w, w_h, depth, freq, mmulth, mmultv);
+	d3d->fakemode = true;
 	d3dargs.hwnd = ahwnd;
 	d3dargs.w = w_w;
 	d3dargs.h = w_h;
 	d3dargs.depth = depth;
-	d3dargs.mmult = mmult;
+	d3dargs.mmulth = mmulth;
+	d3dargs.mmultv = mmultv;
 	d3dargs.freq = freq;
-	uae_start_thread_fast (D3D_init_start, NULL, &fakemodetid);
+	uae_start_thread_fast (D3D_init_start, NULL, &d3d->fakemodetid);
 	return NULL;
 }
 
-static bool alloctextures (void)
+static bool alloctextures (struct d3dstruct *d3d)
 {
-	if (!createtexture (tout_w, tout_h, window_w, window_h))
+	if (!createtexture (d3d, d3d->tout_w, d3d->tout_h, d3d->window_w, d3d->window_h))
 		return false;
-	if (!createamigatexture (tin_w, tin_h))
+	if (!createamigatexture (d3d, d3d->tin_w, d3d->tin_h))
 		return false;
 	return true;
 }
 
-bool D3D_alloctexture (int w, int h)
+static bool xD3D_alloctexture (int monid, int w, int h)
 {
-	tin_w = w * dmult;
-	tin_h = h * dmult;
+	struct d3dstruct *d3d = &d3ddata[monid];
 
-	tout_w = tin_w * dmultx;
-	tout_h = tin_h * dmultx;
+	d3d->tin_w = w * d3d->dmult;
+	d3d->tin_h = h * d3d->dmult;
 
-	if (fakemode)
+	d3d->tout_w = d3d->tin_w * d3d->dmultxh;
+	d3d->tout_h = d3d->tin_h * d3d->dmultxv;
+
+	if (d3d->fakemode)
 		return false;
 
-	changed_prefs.leds_on_screen = currprefs.leds_on_screen = currprefs.leds_on_screen | STATUSLINE_TARGET;
+	changed_prefs.leds_on_screen |= STATUSLINE_TARGET;
+	currprefs.leds_on_screen |= STATUSLINE_TARGET;
 
-	freetextures ();
-	return alloctextures ();
+	freetextures (d3d);
+	return alloctextures (d3d);
 }
 
 
 static HRESULT reset (void)
 {
+	struct d3dstruct *d3d = &d3ddata[0];
 	HRESULT hr;
-	bool oldrender = renderdisabled;
-	renderdisabled = true;
-	if (d3dex)
-		hr = d3ddevex->ResetEx (&dpp, dpp.Windowed ? NULL : &modeex);
+	bool oldrender = d3d->renderdisabled;
+	d3d->renderdisabled = true;
+	if (d3d->d3dex)
+		hr = d3d->d3ddevex->ResetEx (&d3d->dpp, d3d->dpp.Windowed ? NULL : &d3d->modeex);
 	else
-		hr = d3ddev->Reset (&dpp);
-	renderdisabled = oldrender;
+		hr = d3d->d3ddev->Reset (&d3d->dpp);
+	d3d->renderdisabled = oldrender;
 	return hr;
 }
 
-static int D3D_needreset (void)
+static int D3D_needreset (struct d3dstruct *d3d)
 {
 	HRESULT hr;
 	bool do_dd = false;
 
-	if (!devicelost)
+	if (!d3d->devicelost)
 		return -1;
-	if (d3dex)
-		hr = d3ddevex->CheckDeviceState (d3dhwnd);
+	if (d3d->d3dex)
+		hr = d3d->d3ddevex->CheckDeviceState (d3d->d3dhwnd);
 	else
-		hr = d3ddev->TestCooperativeLevel ();
+		hr = d3d->d3ddev->TestCooperativeLevel ();
 	if (hr == S_PRESENT_OCCLUDED) {
 		// no need to draw anything
 		return 1;
 	}
 	if (hr == D3DERR_DEVICELOST) {
-		renderdisabled = true;
+		d3d->renderdisabled = true;
 		// lost but can't be reset yet
 		return 1;
 	}
 	if (hr == D3DERR_DEVICENOTRESET) {
 		// lost and can be reset
 		write_log (_T("%s: DEVICENOTRESET\n"), D3DHEAD);
-		devicelost = 2;
-		invalidatedeviceobjects ();
-		freetextures ();
+		d3d->devicelost = 2;
+		invalidatedeviceobjects (d3d);
+		freetextures (d3d);
 		hr = reset ();
 		if (FAILED (hr)) {
 			write_log (_T("%s: Reset failed %s\n"), D3DHEAD, D3D_ErrorString (hr));
-			resetcount++;
-			if (resetcount > 2 || hr == D3DERR_DEVICEHUNG) {
+			d3d->resetcount++;
+			if (d3d->resetcount > 2 || hr == D3DERR_DEVICEHUNG) {
 				changed_prefs.gfx_api = 0;
 				write_log (_T("%s: Too many failed resets, disabling Direct3D mode\n"), D3DHEAD);
 			}
 			return 1;
 		}
-		devicelost = 0;
+		d3d->devicelost = 0;
 		write_log (_T("%s: Reset succeeded\n"), D3DHEAD);
-		renderdisabled = false;
-		restoredeviceobjects ();
-		alloctextures ();
+		d3d->renderdisabled = false;
+		restoredeviceobjects (d3d);
+		alloctextures (d3d);
 		return -1;
 	} else if (hr == S_PRESENT_MODE_CHANGED) {
-		write_log (_T("%s: S_PRESENT_MODE_CHANGED (%d,%d)\n"), D3DHEAD, ddraw_fs, ddraw_fs_attempt);
+		write_log (_T("%s: S_PRESENT_MODE_CHANGED (%d,%d)\n"), D3DHEAD, d3d->ddraw_fs, d3d->ddraw_fs_attempt);
 #if 0
-		if (!ddraw_fs) {
-			ddraw_fs_attempt++;
-			if (ddraw_fs_attempt >= 5) {
+		if (!d3d->ddraw_fs) {
+			d3d->ddraw_fs_attempt++;
+			if (d3d->ddraw_fs_attempt >= 5) {
 				do_dd = true;
 			}
 		}
 #endif
 	}
 	if (SUCCEEDED (hr)) {
-		devicelost = 0;
-		invalidatedeviceobjects ();
+		d3d->devicelost = 0;
+		invalidatedeviceobjects (d3d);
 		if (do_dd) {
 			write_log (_T("%s: S_PRESENT_MODE_CHANGED, Retrying fullscreen with DirectDraw\n"), D3DHEAD);
-			ddraw_fs_hack_init ();
+			ddraw_fs_hack_init (d3d);
 		}
 		hr = reset ();
 		if (FAILED (hr))
 			write_log (_T("%s: Reset failed %s\n"), D3DHEAD, D3D_ErrorString (hr));
-		restoredeviceobjects ();
+		restoredeviceobjects (d3d);
 		return -1;
 	}
 	write_log (_T("%s: TestCooperativeLevel %s\n"), D3DHEAD, D3D_ErrorString (hr));
 	return 0;
 }
 
-static void D3D_showframe2 (bool dowait)
+static void D3D_showframe2 (struct d3dstruct *d3d, bool dowait)
 {
 	HRESULT hr;
 
-	if (!isd3d ())
+	if (!isd3d (d3d))
 		return;
 	for (;;) {
-		if (d3dswapchain)
-			hr = d3dswapchain->Present (NULL, NULL, NULL, NULL, dowait ? 0 : D3DPRESENT_DONOTWAIT);
+		if (d3d->d3dswapchain)
+			hr = d3d->d3dswapchain->Present (NULL, NULL, NULL, NULL, dowait ? 0 : D3DPRESENT_DONOTWAIT);
 		else
-			hr = d3ddev->Present (NULL, NULL, NULL, NULL);
+			hr = d3d->d3ddev->Present (NULL, NULL, NULL, NULL);
 		if (hr == D3DERR_WASSTILLDRAWING) {
-			wasstilldrawing_broken = false;
+			d3d->wasstilldrawing_broken = false;
 			if (!dowait)
 				return;
 			sleep_millis (1);
 			continue;
 		} else if (hr == S_PRESENT_OCCLUDED) {
-			renderdisabled = true;
+			d3d->renderdisabled = true;
 		} else if (hr == S_PRESENT_MODE_CHANGED) {
 			// In most cases mode actually didn't change but
 			// D3D is just being stupid and not accepting
@@ -2785,36 +3268,40 @@ static void D3D_showframe2 (bool dowait)
 		} else if (FAILED (hr)) {
 			write_log (_T("%s: Present() %s\n"), D3DHEAD, D3D_ErrorString (hr));
 			if (hr == D3DERR_DEVICELOST || hr == S_PRESENT_MODE_CHANGED) {
-				devicelost = 1;
-				renderdisabled = true;
+				d3d->devicelost = 1;
+				d3d->renderdisabled = true;
 				write_log (_T("%s: mode changed or fullscreen focus lost\n"), D3DHEAD);
 			}
 		} else {
-			ddraw_fs_attempt = 0;
+			d3d->ddraw_fs_attempt = 0;
 		}
 		return;
 	}
 }
 
-void D3D_restore (void)
+static void xD3D_restore(int monid, bool checkonly)
 {
-	renderdisabled = false;
+	struct d3dstruct *d3d = &d3ddata[monid];
+	if (checkonly)
+		return;
+	d3d->renderdisabled = false;
 }
 
-void D3D_clear (void)
+static void xD3D_clear (int monid)
 {
+	struct d3dstruct *d3d = &d3ddata[monid];
 	int i;
 	HRESULT hr;
 
-	if (!isd3d ())
+	if (!isd3d (d3d))
 		return;
 	for (i = 0; i < 2; i++) {
-		hr = d3ddev->Clear (0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, d3ddebug ? 0x80 : 0x00), 0, 0);
-		D3D_showframe2 (true);		
+		hr = d3d->d3ddev->Clear (0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, d3ddebug ? 0x80 : 0x00), 0, 0);
+		D3D_showframe2 (d3d, true);		
 	}
 }
 
-static LPDIRECT3DTEXTURE9 processshader(LPDIRECT3DTEXTURE9 srctex, struct shaderdata *s, bool rendertarget)
+static LPDIRECT3DTEXTURE9 processshader(struct d3dstruct *d3d, LPDIRECT3DTEXTURE9 srctex, struct shaderdata *s, bool rendertarget)
 {
 	HRESULT hr;
 	UINT uPasses, uPass;
@@ -2825,24 +3312,24 @@ static LPDIRECT3DTEXTURE9 processshader(LPDIRECT3DTEXTURE9 srctex, struct shader
 	if (!psEffect_SetTextures (srctex, s))
 		return NULL;
 	if (s->psPreProcess) {
-		if (!psEffect_SetMatrices (&m_matPreProj, &m_matPreView, &m_matPreWorld, s))
+		if (!psEffect_SetMatrices (&d3d->m_matPreProj, &d3d->m_matPreView, &d3d->m_matPreWorld, s))
 			return NULL;
 
-		if (FAILED (hr = d3ddev->GetRenderTarget (0, &lpRenderTarget)))
+		if (FAILED (hr = d3d->d3ddev->GetRenderTarget (0, &lpRenderTarget)))
 			write_log (_T("%s: GetRenderTarget: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		lpWorkTexture = s->lpWorkTexture1;
 		lpNewRenderTarget = NULL;
 pass2:
 		if (FAILED (hr = lpWorkTexture->GetSurfaceLevel (0, &lpNewRenderTarget)))
 			write_log (_T("%s: GetSurfaceLevel: %s\n"), D3DHEAD, D3D_ErrorString (hr));
-		if (FAILED (hr = d3ddev->SetRenderTarget (0, lpNewRenderTarget)))
+		if (FAILED (hr = d3d->d3ddev->SetRenderTarget (0, lpNewRenderTarget)))
 			write_log (_T("%s: SetRenderTarget: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 
 		uPasses = 0;
 		if (psEffect_Begin ((lpWorkTexture == s->lpWorkTexture1) ? psEffect_PreProcess1 : psEffect_PreProcess2, &uPasses, s)) {
 			for (uPass = 0; uPass < uPasses; uPass++) {
 				if (psEffect_BeginPass (s->pEffect, uPass)) {
-					if (FAILED (hr = d3ddev->DrawPrimitive (D3DPT_TRIANGLESTRIP, 4, 2))) {
+					if (FAILED (hr = d3d->d3ddev->DrawPrimitive (D3DPT_TRIANGLESTRIP, 4, 2))) {
 						write_log (_T("%s: Effect DrawPrimitive failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 					}
 					psEffect_EndPass (s->pEffect);
@@ -2850,7 +3337,7 @@ pass2:
 			}
 			psEffect_End (s->pEffect);
 		}
-		if (FAILED (hr = d3ddev->SetRenderTarget (0, lpRenderTarget)))
+		if (FAILED (hr = d3d->d3ddev->SetRenderTarget (0, lpRenderTarget)))
 			write_log (_T("%s: Effect RenderTarget reset failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		lpNewRenderTarget->Release ();
 		lpNewRenderTarget = NULL;
@@ -2861,15 +3348,15 @@ pass2:
 		lpRenderTarget->Release ();
 		lpRenderTarget = NULL;
 	}
-	psEffect_SetMatrices (&m_matProj2, &m_matView2, &m_matWorld2, s);
+	psEffect_SetMatrices (&d3d->m_matProj2, &d3d->m_matView2, &d3d->m_matWorld2, s);
 
 	if (rendertarget) {
 #if TWOPASS
-		if (FAILED (hr = d3ddev->GetRenderTarget (0, &lpRenderTarget)))
+		if (FAILED (hr = d3d->d3ddev->GetRenderTarget (0, &lpRenderTarget)))
 			write_log (_T("%s: GetRenderTarget: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		if (FAILED (hr = s->lpTempTexture->GetSurfaceLevel (0, &lpNewRenderTarget)))
 			write_log (_T("%s: GetSurfaceLevel: %s\n"), D3DHEAD, D3D_ErrorString (hr));
-		if (FAILED (hr = d3ddev->SetRenderTarget (0, lpNewRenderTarget)))
+		if (FAILED (hr = d3d->d3ddev->SetRenderTarget (0, lpNewRenderTarget)))
 			write_log (_T("%s: SetRenderTarget: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 #endif
 	}
@@ -2879,7 +3366,7 @@ pass2:
 		for (uPass = 0; uPass < uPasses; uPass++) {
 			if (!psEffect_BeginPass (s->pEffect, uPass))
 				return NULL;
-			if (FAILED (hr = d3ddev->DrawPrimitive (D3DPT_TRIANGLESTRIP, 0, 2)))
+			if (FAILED (hr = d3d->d3ddev->DrawPrimitive (D3DPT_TRIANGLESTRIP, 0, 2)))
 				write_log (_T("%s: Effect2 DrawPrimitive failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 			psEffect_EndPass (s->pEffect);
 		}
@@ -2887,7 +3374,7 @@ pass2:
 	}
 	if (rendertarget) {
 #if TWOPASS
-		if (FAILED (hr = d3ddev->SetRenderTarget (0, lpRenderTarget)))
+		if (FAILED (hr = d3d->d3ddev->SetRenderTarget (0, lpRenderTarget)))
 			write_log (_T("%s: SetRenderTarget: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		lpNewRenderTarget->Release ();
 		lpRenderTarget->Release ();
@@ -2896,49 +3383,97 @@ pass2:
 	return s->lpTempTexture;
 }
 
-static void D3D_render2 (void)
+static void xD3D_led(int led, int on, int brightness)
+{
+	struct d3dstruct *d3d = &d3ddata[0];
+	leds[led] = on;
+}
+
+static int xD3D_debug(int monid, int mode)
+{
+	struct d3dstruct *d3d = &d3ddata[monid];
+	int old = debugcolors ? 1 : 0;
+	debugcolors = (mode & 1) != 0;
+	noclear = debugcolors ? false : true;
+	clearcnt = 0;
+	return old;
+}
+
+static void clearrt(struct d3dstruct *d3d)
 {
 	HRESULT hr;
-	LPDIRECT3DTEXTURE9 srctex = texture;
+	uae_u8 color[4] = { 0, 0, 0, 0 };
+
+	if (noclear && cannoclear) {
+		if (clearcnt > 3)
+			return;
+		clearcnt++;
+	}
+
+	if (!noclear && debugcolors && slicecnt > 0) {
+		int cnt = slicecnt - 1;
+		int v = cnt % 3;
+		if (cnt / 3 == 1)
+			color[(v + 1) % 3] = 80;
+		color[v] = 80;
+	}
+
+	hr = d3d->d3ddev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(color[0], d3ddebug ? 0x80 : color[1], color[2]), 0, 0);
+}
+
+static void D3D_render2(struct d3dstruct *d3d, int mode)
+{
+	struct AmigaMonitor *mon = &AMonitors[d3d - d3ddata];
+	HRESULT hr;
+	LPDIRECT3DTEXTURE9 srctex = d3d->texture;
 	UINT uPasses, uPass;
 
-	if (!isd3d ())
+	if (!isd3d (d3d) || !d3d->texture)
 		return;
 
-	hr = d3ddev->Clear (0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, d3ddebug ? 0x80 : 0, 0), 0, 0);
+	bool normalrender = mode < 0 || (mode & 1);
 
-	if (FAILED (hr = d3ddev->BeginScene ())) {
+	if (mode > 0 && (mode & 2))
+		slicecnt = 0;
+	else if (mode < 0)
+		slicecnt = slicecnt == 2 ? 0 : slicecnt;
+
+	clearrt(d3d);
+
+	slicecnt++;
+
+	if (FAILED (hr = d3d->d3ddev->BeginScene ())) {
 		write_log (_T("%s: BeginScene: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		return;
 	}
-	if (shaderon > 0 && shaders[SHADER_POST].pEffect) {
+	if (shaderon > 0 && d3d->shaders[SHADER_POST].pEffect) {
 		for (int i = 0; i < MAX_SHADERS; i++) {
-			struct shaderdata *s = &shaders[i];
+			struct shaderdata *s = &d3d->shaders[i];
 			if (s->type == SHADERTYPE_BEFORE)
-				settransform_pre (s);
+				settransform_pre (d3d, s);
 			if (s->type == SHADERTYPE_MIDDLE) {
-				m_matProj = m_matProj_out;
-				m_matView = m_matView_out;
-				m_matWorld = m_matWorld_out;
+				d3d->m_matProj = d3d->m_matProj_out;
+				d3d->m_matView = d3d->m_matView_out;
+				d3d->m_matWorld = d3d->m_matWorld_out;
 			}
 			if (s->type == SHADERTYPE_BEFORE || s->type == SHADERTYPE_MIDDLE) {
-				settransform (s);
-				srctex = processshader (srctex, s, true);
+				settransform (d3d, s);
+				srctex = processshader (d3d, srctex, s, true);
 				if (!srctex)
 					return;
 			}
 		}
 	}
 
-	m_matProj = m_matProj_out;
-	m_matView = m_matView_out;
-	m_matWorld = m_matWorld_out;
+	d3d->m_matProj = d3d->m_matProj_out;
+	d3d->m_matView = d3d->m_matView_out;
+	d3d->m_matWorld = d3d->m_matWorld_out;
 
 #if TWOPASS
-	if (shaderon > 0 && shaders[SHADER_POST].pEffect) {
+	if (shaderon > 0 && d3d->shaders[SHADER_POST].pEffect) {
 		LPDIRECT3DSURFACE9 lpRenderTarget;
 		LPDIRECT3DSURFACE9 lpNewRenderTarget;
-		struct shaderdata *s = &shaders[SHADER_POST];
+		struct shaderdata *s = &d3d->shaders[SHADER_POST];
 		LPD3DXEFFECT postEffect = s->pEffect;
 		int after = -1;
 		LPDIRECT3DTEXTURE9 masktexture = NULL;
@@ -2946,55 +3481,76 @@ static void D3D_render2 (void)
 		D3DXVECTOR4 texelsize;
 
 		for (int i = 0; i < MAX_SHADERS; i++) {
-			struct shaderdata *s = &shaders[i];
+			struct shaderdata *s = &d3d->shaders[i];
 			if (s->type == SHADERTYPE_AFTER)
 				after = i;
-			if (s->masktexture)
+			if (s->type == SHADERTYPE_MASK_MIDDLE && s->masktexture)
 				masktexture = s->masktexture;
 		}
 
-		setupscenecoords ();
-		hr = d3ddev->SetTransform (D3DTS_PROJECTION, &m_matProj);
-		hr = d3ddev->SetTransform (D3DTS_VIEW, &m_matView);
-		hr = d3ddev->SetTransform (D3DTS_WORLD, &m_matWorld);
+		setupscenecoords(d3d, normalrender);
+		hr = d3d->d3ddev->SetTransform (D3DTS_PROJECTION, &d3d->m_matProj);
+		hr = d3d->d3ddev->SetTransform (D3DTS_VIEW, &d3d->m_matView);
+		hr = d3d->d3ddev->SetTransform (D3DTS_WORLD, &d3d->m_matWorld);
 
-		hr = postEffect->SetMatrix (postMatrixSource, &postproj);
-		hr = postEffect->SetVector (postMaskMult, &maskmult);
-		hr = postEffect->SetVector (postMaskShift, &maskshift);
+		hr = postEffect->SetMatrix (d3d->postMatrixSource, &d3d->postproj);
+		hr = postEffect->SetVector (d3d->postMaskMult, &d3d->maskmult);
+		hr = postEffect->SetVector (d3d->postMaskShift, &d3d->maskshift);
 
 		srctex->GetLevelDesc (0, &Desc);
 		texelsize.x = 1.0f / Desc.Width;
 		texelsize.y = 1.0f / Desc.Height;
 		texelsize.z = 1; texelsize.w = 1;
-		hr = postEffect->SetVector (postTexelSize, &texelsize);
-		if (postFramecounterHandle)
-			postEffect->SetFloat(postFramecounterHandle, timeframes);
+		hr = postEffect->SetVector (d3d->postTexelSize, &texelsize);
+		if (d3d->postFramecounterHandle)
+			postEffect->SetFloat(d3d->postFramecounterHandle, timeframes);
 
 		if (masktexture) {
-			if (FAILED (hr = postEffect->SetTechnique (postTechnique)))
+			if (FAILED (hr = postEffect->SetTechnique (d3d->postTechnique)))
 				write_log (_T("%s: SetTechnique(postTechnique) failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
-			if (FAILED (hr = postEffect->SetTexture (postMaskTextureHandle, masktexture)))
+			if (FAILED (hr = postEffect->SetTexture (d3d->postMaskTextureHandle, masktexture)))
 				write_log (_T("%s: SetTexture(masktexture) failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
-		} else if (sltexture) {
-			if (FAILED (hr = postEffect->SetTechnique (postTechniqueAlpha)))
+		} else if (d3d->sltexture) {
+			if (FAILED (hr = postEffect->SetTechnique (d3d->postTechniqueAlpha)))
 				write_log (_T("%s: SetTechnique(postTechniqueAlpha) failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
-			if (FAILED (hr = postEffect->SetTexture (postMaskTextureHandle, sltexture)))
+			if (FAILED (hr = postEffect->SetTexture (d3d->postMaskTextureHandle, d3d->sltexture)))
 				write_log (_T("%s: SetTexture(sltexture) failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		} else {
-			if (FAILED (hr = postEffect->SetTechnique (postTechniquePlain)))
+			if (FAILED (hr = postEffect->SetTechnique (d3d->postTechniquePlain)))
 				write_log (_T("%s: SetTechnique(postTechniquePlain) failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		}
-		hr = postEffect->SetInt (postFilterMode, filterd3d->gfx_filter_bilinear ? D3DTEXF_LINEAR : D3DTEXF_POINT);
+		hr = postEffect->SetInt (d3d->postFilterMode, d3d->filterd3d->gfx_filter_bilinear ? D3DTEXF_LINEAR : D3DTEXF_POINT);
 
-		if (FAILED (hr = postEffect->SetTexture (postSourceTextureHandle, srctex)))
+		if (FAILED (hr = postEffect->SetTexture (d3d->postSourceTextureHandle, srctex)))
 			write_log (_T("%s: SetTexture(srctex) failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 
+		if (s->m_SourceDimsEffectHandle) {
+			D3DXVECTOR4 fDimsSource;
+			fDimsSource.x = (FLOAT)Desc.Width;
+			fDimsSource.y = (FLOAT)Desc.Height;
+			fDimsSource.z  = 1; fDimsSource.w = 1;
+			hr = postEffect->SetVector(s->m_SourceDimsEffectHandle, &fDimsSource);
+			if (FAILED(hr)) {
+				write_log(_T("%s: SetTextures:SetVector:Source %s\n"), D3DHEAD, D3D_ErrorString(hr));
+			}
+		}
+		if (s->m_TargetDimsEffectHandle) {
+			D3DXVECTOR4 fDimsTarget;
+			fDimsTarget.x = s->targettex_width;
+			fDimsTarget.y = s->targettex_height;
+			fDimsTarget.z = 1; fDimsTarget.w = 1;
+			hr = postEffect->SetVector(s->m_TargetDimsEffectHandle, &fDimsTarget);
+			if (FAILED(hr)) {
+				write_log(_T("%s: SetTextures:SetVector:Target %s\n"), D3DHEAD, D3D_ErrorString(hr));
+			}
+		}
+
 		if (after >= 0) {
-			if (FAILED (hr = d3ddev->GetRenderTarget (0, &lpRenderTarget)))
+			if (FAILED (hr = d3d->d3ddev->GetRenderTarget (0, &lpRenderTarget)))
 				write_log (_T("%s: GetRenderTarget: %s\n"), D3DHEAD, D3D_ErrorString (hr));
-			if (FAILED (hr = lpPostTempTexture->GetSurfaceLevel (0, &lpNewRenderTarget)))
+			if (FAILED (hr = d3d->lpPostTempTexture->GetSurfaceLevel (0, &lpNewRenderTarget)))
 				write_log (_T("%s: GetSurfaceLevel: %s\n"), D3DHEAD, D3D_ErrorString (hr));
-			if (FAILED (hr = d3ddev->SetRenderTarget (0, lpNewRenderTarget)))
+			if (FAILED (hr = d3d->d3ddev->SetRenderTarget (0, lpNewRenderTarget)))
 				write_log (_T("%s: SetRenderTarget: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		}
 
@@ -3002,7 +3558,7 @@ static void D3D_render2 (void)
 		if (psEffect_Begin (psEffect_None, &uPasses, s)) {
 			for (uPass = 0; uPass < uPasses; uPass++) {
 				if (psEffect_BeginPass (postEffect, uPass)) {
-					if (FAILED (hr = d3ddev->DrawPrimitive (D3DPT_TRIANGLESTRIP, 0, 2)))
+					if (FAILED (hr = d3d->d3ddev->DrawPrimitive (D3DPT_TRIANGLESTRIP, 0, 2)))
 						write_log (_T("%s: Post DrawPrimitive failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 					psEffect_EndPass (postEffect);
 				}
@@ -3011,17 +3567,17 @@ static void D3D_render2 (void)
 		}
 
 		if (after >= 0) {
-			if (FAILED (hr = d3ddev->SetRenderTarget (0, lpRenderTarget)))
+			if (FAILED (hr = d3d->d3ddev->SetRenderTarget (0, lpRenderTarget)))
 				write_log (_T("%s: SetRenderTarget: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 			lpNewRenderTarget->Release ();
 			lpRenderTarget->Release ();
 
-			srctex = lpPostTempTexture;
+			srctex = d3d->lpPostTempTexture;
 			for (int i = 0; i < MAX_SHADERS; i++) {
-				struct shaderdata *s = &shaders[i];
+				struct shaderdata *s = &d3d->shaders[i];
 				if (s->type == SHADERTYPE_AFTER) {
-					settransform2 (s);
-					srctex = processshader (srctex, s, i != after);
+					settransform2 (d3d, s);
+					srctex = processshader (d3d, srctex, s, i != after);
 					if (!srctex)
 						return;
 				}
@@ -3031,55 +3587,57 @@ static void D3D_render2 (void)
 	} else {
 
 		// non-shader version
-		setupscenecoords ();
-		hr = d3ddev->SetTransform (D3DTS_PROJECTION, &m_matProj);
-		hr = d3ddev->SetTransform (D3DTS_VIEW, &m_matView);
-		hr = d3ddev->SetTransform (D3DTS_WORLD, &m_matWorld);
-		hr = d3ddev->SetTexture (0, srctex);
-		hr = d3ddev->DrawPrimitive (D3DPT_TRIANGLESTRIP, 0, 2);
-		int bl = filterd3d->gfx_filter_bilinear ? D3DTEXF_LINEAR : D3DTEXF_POINT;
-		hr = d3ddev->SetSamplerState (0, D3DSAMP_MINFILTER, bl);
-		hr = d3ddev->SetSamplerState (0, D3DSAMP_MAGFILTER, bl);
+		setupscenecoords (d3d, normalrender);
+		hr = d3d->d3ddev->SetTransform (D3DTS_PROJECTION, &d3d->m_matProj);
+		hr = d3d->d3ddev->SetTransform (D3DTS_VIEW, &d3d->m_matView);
+		hr = d3d->d3ddev->SetTransform (D3DTS_WORLD, &d3d->m_matWorld);
+		hr = d3d->d3ddev->SetTexture (0, srctex);
+		hr = d3d->d3ddev->DrawPrimitive (D3DPT_TRIANGLESTRIP, 0, 2);
+		int bl = d3d->filterd3d->gfx_filter_bilinear ? D3DTEXF_LINEAR : D3DTEXF_POINT;
+		hr = d3d->d3ddev->SetSamplerState(0, D3DSAMP_MINFILTER, bl);
+		hr = d3d->d3ddev->SetSamplerState(0, D3DSAMP_MAGFILTER, bl);
+		hr = d3d->d3ddev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+		hr = d3d->d3ddev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
 
-		if (sprite && sltexture) {
+		if (d3d->sprite && d3d->sltexture) {
 			D3DXVECTOR3 v;
-			sprite->Begin (D3DXSPRITE_ALPHABLEND);
+			d3d->sprite->Begin(D3DXSPRITE_ALPHABLEND);
 			v.x = v.y = v.z = 0;
-			sprite->Draw (sltexture, NULL, NULL, &v, 0xffffffff);
-			sprite->End ();
+			d3d->sprite->Draw(d3d->sltexture, NULL, NULL, &v, 0xffffffff);
+			d3d->sprite->End();
 		}
 	}
 
-	if (sprite && ((ledtexture) || (mask2texture) || (cursorsurfaced3d && cursor_v))) {
+	if (d3d->sprite && ((d3d->ledtexture) || (d3d->mask2texture) || (d3d->cursorsurfaced3d && d3d->cursor_v))) {
 		D3DXVECTOR3 v;
-		sprite->Begin (D3DXSPRITE_ALPHABLEND);
-		if (cursorsurfaced3d && cursor_v) {
+		d3d->sprite->Begin(D3DXSPRITE_ALPHABLEND);
+		if (d3d->cursorsurfaced3d && d3d->cursor_v) {
 			D3DXMATRIXA16 t;
 
-			if (cursor_scale)
-				MatrixScaling (&t, ((float)(window_w) / (tout_w + 2 * cursor_offset2_x)), ((float)(window_h) / (tout_h + 2 * cursor_offset2_y)), 0);
+			if (d3d->cursor_scale)
+				MatrixScaling(&t, ((float)(d3d->window_w) / (d3d->tout_w + 2 * d3d->cursor_offset2_x)), ((float)(d3d->window_h) / (d3d->tout_h + 2 * d3d->cursor_offset2_y)), 0);
 			else
-				MatrixScaling (&t, 1.0f, 1.0f, 0);
-			v.x = cursor_x + cursor_offset2_x;
-			v.y = cursor_y + cursor_offset2_y;
+				MatrixScaling(&t, 1.0f, 1.0f, 0);
+			v.x = d3d->cursor_x + d3d->cursor_offset2_x;
+			v.y = d3d->cursor_y + d3d->cursor_offset2_y;
 			v.z = 0;
-			sprite->SetTransform (&t);
-			sprite->Draw (cursorsurfaced3d, NULL, NULL, &v, 0xffffffff);
-			MatrixScaling (&t, 1, 1, 0);
-			sprite->Flush ();
-			sprite->SetTransform (&t);
+			d3d->sprite->SetTransform(&t);
+			d3d->sprite->Draw(d3d->cursorsurfaced3d, NULL, NULL, &v, 0xffffffff);
+			MatrixScaling(&t, 1, 1, 0);
+			d3d->sprite->Flush();
+			d3d->sprite->SetTransform(&t);
 		}
-		if (mask2texture) {
+		if (d3d->mask2texture) {
 			D3DXMATRIXA16 t;
 			RECT r;
-			float srcw = mask2texture_w;
-			float srch = mask2texture_h;
+			float srcw = d3d->mask2texture_w;
+			float srch = d3d->mask2texture_h;
 			float aspectsrc = srcw / srch;
-			float aspectdst = (float)window_w / window_h;
+			float aspectdst = (float)d3d->window_w / d3d->window_h;
 			float w, h;
 
-			w = mask2texture_multx;
-			h = mask2texture_multy;
+			w = d3d->mask2texture_multx;
+			h = d3d->mask2texture_multy;
 #if 0
 			if (currprefs.gfx_filteroverlay_pos.width > 0)
 				w = (float)currprefs.gfx_filteroverlay_pos.width / srcw;
@@ -3098,120 +3656,138 @@ static void D3D_render2 (void)
 			MatrixScaling (&t, w, h, 0);
 
 			v.x = 0;
-			if (filterd3d->gfx_filteroverlay_pos.x == -1)
-				v.x = (window_w - (mask2texture_w * w)) / 2;
-			else if (filterd3d->gfx_filteroverlay_pos.x > -24000)
-				v.x = filterd3d->gfx_filteroverlay_pos.x;
+			if (d3d->filterd3d->gfx_filteroverlay_pos.x == -1)
+				v.x = (d3d->window_w - (d3d->mask2texture_w * w)) / 2;
+			else if (d3d->filterd3d->gfx_filteroverlay_pos.x > -24000)
+				v.x = d3d->filterd3d->gfx_filteroverlay_pos.x;
 			else
-				v.x = (window_w - (mask2texture_w * w)) / 2 + (-filterd3d->gfx_filteroverlay_pos.x - 30100) * window_w / 100.0;
+				v.x = (d3d->window_w - (d3d->mask2texture_w * w)) / 2 + (-d3d->filterd3d->gfx_filteroverlay_pos.x - 30100) * d3d->window_w / 100.0;
 
 			v.y = 0;
-			if (filterd3d->gfx_filteroverlay_pos.y == -1)
-				v.y = (window_h - (mask2texture_h * h)) / 2;
-			else if (filterd3d->gfx_filteroverlay_pos.y > -24000)
-				v.y = filterd3d->gfx_filteroverlay_pos.y;
+			if (d3d->filterd3d->gfx_filteroverlay_pos.y == -1)
+				v.y = (d3d->window_h - (d3d->mask2texture_h * h)) / 2;
+			else if (d3d->filterd3d->gfx_filteroverlay_pos.y > -24000)
+				v.y = d3d->filterd3d->gfx_filteroverlay_pos.y;
 			else
-				v.y = (window_h - (mask2texture_h * h)) / 2 + (-filterd3d->gfx_filteroverlay_pos.y - 30100) * window_h / 100.0;
+				v.y = (d3d->window_h - (d3d->mask2texture_h * h)) / 2 + (-d3d->filterd3d->gfx_filteroverlay_pos.y - 30100) * d3d->window_h / 100.0;
 
 			v.x /= w;
 			v.y /= h;
 			v.x = v.y = 0;
 			v.z = 0;
-			v.x += mask2texture_offsetw / w;
+			v.x += d3d->mask2texture_offsetw / w;
 
 			r.left = 0;
 			r.top = 0;
-			r.right = mask2texture_w;
-			r.bottom = mask2texture_h;
+			r.right = d3d->mask2texture_w;
+			r.bottom = d3d->mask2texture_h;
 			if (showoverlay) {
-				sprite->SetTransform (&t);
-				sprite->Draw (mask2texture, &r, NULL, &v, 0xffffffff);
-				sprite->Flush ();
+				d3d->sprite->SetTransform(&t);
+				d3d->sprite->Draw(d3d->mask2texture, &r, NULL, &v, 0xffffffff);
+				d3d->sprite->Flush();
+				for (int i = 0; overlayleds[i]; i++) {
+					bool led = leds[ledtypes[i]] != 0;
+					if (led || (ledtypes[i] == LED_POWER && currprefs.power_led_dim)) {
+						LPDIRECT3DTEXTURE9 spr = d3d->mask2textureleds[i];
+						if (!led && ledtypes[i] == LED_POWER && currprefs.power_led_dim)
+							spr = d3d->mask2textureled_power_dim;
+						if (spr) {
+							v.x = d3d->mask2texture_offsetw / w + d3d->mask2textureledoffsets[i * 2 + 0];
+							v.y = d3d->mask2textureledoffsets[i * 2 + 1];
+							v.z = 0;
+							d3d->sprite->Draw(spr, NULL, NULL, &v, 0xffffffff);
+							d3d->sprite->Flush();
+						}
+					}
+				}
 			}
-			MatrixScaling (&t, 1, 1, 0);
-			sprite->SetTransform (&t);
 
-			if (mask2texture_offsetw > 0) {
+			MatrixScaling(&t, 1, 1, 0);
+			d3d->sprite->SetTransform(&t);
+
+			if (d3d->mask2texture_offsetw > 0) {
 				v.x = 0;
 				v.y = 0;
 				r.left = 0;
 				r.top = 0;
-				r.right = mask2texture_offsetw + 1;
-				r.bottom = window_h;
-				sprite->Draw (blanktexture, &r, NULL, &v, 0xffffffff);
-				if (window_w > mask2texture_offsetw + mask2texture_ww) {
-					v.x = mask2texture_offsetw + mask2texture_ww;
+				r.right = d3d->mask2texture_offsetw + 1;
+				r.bottom = d3d->window_h;
+				d3d->sprite->Draw (d3d->blanktexture, &r, NULL, &v, 0xffffffff);
+				if (d3d->window_w > d3d->mask2texture_offsetw + d3d->mask2texture_ww) {
+					v.x = d3d->mask2texture_offsetw + d3d->mask2texture_ww;
 					v.y = 0;
 					r.left = 0;
 					r.top = 0;
-					r.right = window_w - (mask2texture_offsetw + mask2texture_ww) + 1;
-					r.bottom = window_h;
-					sprite->Draw (blanktexture, &r, NULL, &v, 0xffffffff);
+					r.right = d3d->window_w - (d3d->mask2texture_offsetw + d3d->mask2texture_ww) + 1;
+					r.bottom = d3d->window_h;
+					d3d->sprite->Draw(d3d->blanktexture, &r, NULL, &v, 0xffffffff);
 				}
 			}
 
 		}
-		if (ledtexture && (((currprefs.leds_on_screen & STATUSLINE_RTG) && WIN32GFX_IsPicassoScreen ()) || ((currprefs.leds_on_screen & STATUSLINE_CHIPSET) && !WIN32GFX_IsPicassoScreen ()))) {
+		if (d3d->ledtexture && (((currprefs.leds_on_screen & STATUSLINE_RTG) && WIN32GFX_IsPicassoScreen(mon)) || ((currprefs.leds_on_screen & STATUSLINE_CHIPSET) && !WIN32GFX_IsPicassoScreen(mon)))) {
 			int slx, sly;
-			statusline_getpos (&slx, &sly, window_w, window_h);
+			statusline_getpos(d3d - d3ddata, &slx, &sly, d3d->window_w, d3d->window_h, d3d->statusbar_hx, d3d->statusbar_vx);
 			v.x = slx;
 			v.y = sly;
 			v.z = 0;
-			sprite->Draw (ledtexture, NULL, NULL, &v, 0xffffffff);
+			d3d->sprite->Draw(d3d->ledtexture, NULL, NULL, &v, 0xffffffff);
 		}
-		sprite->End ();
+		struct d3d9overlay *ov = d3d->extoverlays;
+		while (ov) {
+			if (ov->tex) {
+				v.x = ov->x;
+				v.y = ov->y;
+				v.z = 0;
+				d3d->sprite->Draw(ov->tex, NULL, NULL, &v, 0xffffffff);
+			}
+			ov = ov->next;
+		}
+		d3d->sprite->End();
 	}
 #endif
 
-	hr = d3ddev->EndScene ();
+	hr = d3d->d3ddev->EndScene();
 	if (FAILED (hr))
 		write_log (_T("%s: EndScene() %s\n"), D3DHEAD, D3D_ErrorString (hr));
 }
 
-void D3D_setcursor (int x, int y, int width, int height, bool visible, bool noscale)
+static bool xD3D_setcursor(int monid, int x, int y, int width, int height, bool visible, bool noscale)
 {
+	struct d3dstruct *d3d = &d3ddata[monid];
+
+	if (width < 0 || height < 0)
+		return true;
+
 	if (width && height) {
-		cursor_offset2_x = cursor_offset_x * window_w / width;
-		cursor_offset2_y = cursor_offset_y * window_h / height;
-		cursor_x = x * window_w / width;
-		cursor_y = y * window_h / height;
+		d3d->cursor_offset2_x = d3d->cursor_offset_x * d3d->window_w / width;
+		d3d->cursor_offset2_y = d3d->cursor_offset_y * d3d->window_h / height;
+		d3d->cursor_x = x * d3d->window_w / width;
+		d3d->cursor_y = y * d3d->window_h / height;
 	} else {
-		cursor_x = cursor_y = 0;
-		cursor_offset2_x = cursor_offset2_y = 0;
+		d3d->cursor_x = d3d->cursor_y = 0;
+		d3d->cursor_offset2_x = d3d->cursor_offset2_y = 0;
 	}
-	cursor_scale = !noscale;
-	cursor_v = visible;
+	d3d->cursor_scale = !noscale;
+	d3d->cursor_v = visible;
+	return true;
 }
 
-void D3D_unlocktexture (void)
+static void xD3D_flushtexture(int monid, int miny, int maxy)
 {
-	HRESULT hr;
+	struct d3dstruct *d3d = &d3ddata[monid];
 
-	if (!isd3d () || !texture)
-		return;
-
-	if (locked) {
-		if (currprefs.leds_on_screen & (STATUSLINE_CHIPSET | STATUSLINE_RTG))
-			updateleds ();
-		hr = texture->UnlockRect (0);
-	}
-	locked = 0;
-	fulllocked = 0;
-}
-
-void D3D_flushtexture (int miny, int maxy)
-{
-	if (fakemode || fulllocked || !texture || renderdisabled)
+	if (d3d->fakemode || d3d->fulllocked || !d3d->texture || d3d->renderdisabled)
 		return;
 	if (miny >= 0 && maxy >= 0) {
 		RECT r;
 		maxy++;
 		r.left = 0;
-		r.right = tin_w;
+		r.right = d3d->tin_w;
 		r.top = miny <= 0 ? 0 : miny;
-		r.bottom = maxy <= tin_h ? maxy : tin_h;
+		r.bottom = maxy <= d3d->tin_h ? maxy : d3d->tin_h;
 		if (r.top <= r.bottom) {
-			HRESULT hr = texture->AddDirtyRect (&r);
+			HRESULT hr = d3d->texture->AddDirtyRect (&r);
 			if (FAILED (hr))
 				write_log (_T("%s: AddDirtyRect(): %s\n"), D3DHEAD, D3D_ErrorString (hr));
 			//write_log (_T("%d %d\n"), r.top, r.bottom);
@@ -3219,55 +3795,75 @@ void D3D_flushtexture (int miny, int maxy)
 	}
 }
 
-uae_u8 *D3D_locktexture (int *pitch, int *height, bool fullupdate)
+static void xD3D_unlocktexture(int monid, int y_start, int y_end)
 {
+	struct d3dstruct *d3d = &d3ddata[monid];
+	HRESULT hr;
+
+	if (!isd3d(d3d) || !d3d->texture)
+		return;
+
+	if (d3d->locked) {
+		if (currprefs.leds_on_screen & (STATUSLINE_CHIPSET | STATUSLINE_RTG))
+			updateleds(d3d);
+		hr = d3d->texture->UnlockRect(0);
+		if (y_start >= 0)
+			xD3D_flushtexture(monid, y_start, y_end);
+	}
+	d3d->locked = 0;
+	d3d->fulllocked = 0;
+}
+
+static uae_u8 *xD3D_locktexture (int monid, int *pitch, int *height, bool fullupdate)
+{
+	struct d3dstruct *d3d = &d3ddata[monid];
 	D3DLOCKED_RECT lock;
 	HRESULT hr;
 
-	if (fakemode) {
+	if (d3d->fakemode) {
 		*pitch = 0;
-		return fakebitmap;
+		return d3d->fakebitmap;
 	}
 
-	if (D3D_needreset () > 0) {
+	if (D3D_needreset (d3d) > 0) {
 		return NULL;
 	}
-	if (!isd3d () || !texture)
+	if (!isd3d (d3d) || !d3d->texture)
 		return NULL;
 
-	if (locked) {
+	if (d3d->locked) {
 		write_log (_T("%s: texture already locked!\n"), D3DHEAD);
 		return NULL;
 	}
 
 	lock.pBits = NULL;
 	lock.Pitch = 0;
-	hr = texture->LockRect (0, &lock, NULL, fullupdate ? D3DLOCK_DISCARD : D3DLOCK_NO_DIRTY_UPDATE);
+	hr = d3d->texture->LockRect (0, &lock, NULL, fullupdate ? D3DLOCK_DISCARD : D3DLOCK_NO_DIRTY_UPDATE);
 	if (FAILED (hr)) {
 		write_log (_T("%s: LockRect failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 		return NULL;
 	}
-	locked = 1;
+	d3d->locked = 1;
 	if (lock.pBits == NULL || lock.Pitch == 0) {
 		write_log (_T("%s: LockRect returned NULL texture\n"), D3DHEAD);
-		D3D_unlocktexture ();
+		D3D_unlocktexture(monid, -1, -1);
 		return NULL;
 	}
-	fulllocked = fullupdate;
+	d3d->fulllocked = fullupdate;
 	*pitch = lock.Pitch;
 	if (height)
-		*height = tin_h;
+		*height = d3d->tin_h;
 	return (uae_u8*)lock.pBits;
 }
 
-static void flushgpu (bool wait)
+static void flushgpu (struct d3dstruct *d3d, bool wait)
 {
 	if (currprefs.turbo_emulation)
 		return;
-	if (query) {
-		HRESULT hr = query->Issue (D3DISSUE_END);
+	if (d3d->query) {
+		HRESULT hr = d3d->query->Issue (D3DISSUE_END);
 		if (SUCCEEDED (hr)) {
-			while (query->GetData (NULL, 0, D3DGETDATA_FLUSH) == S_FALSE) {
+			while (d3d->query->GetData (NULL, 0, D3DGETDATA_FLUSH) == S_FALSE) {
 				if (!wait)
 					return;
 			}
@@ -3281,86 +3877,99 @@ static void flushgpu (bool wait)
 	}
 }
 
-bool D3D_renderframe (bool immediate)
+static bool xD3D_renderframe(int monid, int mode, bool immediate)
 {
+	struct d3dstruct *d3d = &d3ddata[monid];
 	static int vsync2_cnt;
 
-	frames_since_init++;
+	d3d->frames_since_init++;
 
-	if (fakemode)
+	if (d3d->fakemode)
 		return true;
 
-	if (!isd3d () || !texture)
+	if (!isd3d (d3d) || !d3d->texture)
 		return false;
 
-	if (filenotificationhandle != NULL) {
+	if (d3d->filenotificationhandle != NULL) {
 		bool notify = false;
-		while (WaitForSingleObject (filenotificationhandle, 0) == WAIT_OBJECT_0) {
-			if (FindNextChangeNotification (filenotificationhandle)) {
-				if (frames_since_init > 50)
+		while (WaitForSingleObject (d3d->filenotificationhandle, 0) == WAIT_OBJECT_0) {
+			if (FindNextChangeNotification (d3d->filenotificationhandle)) {
+				if (d3d->frames_since_init > 50)
 					notify = true;
 			}
 		}
 		if (notify) {
-			devicelost = 2;
+			d3d->devicelost = 2;
 			write_log (_T("%s: Shader file modification notification\n"), D3DHEAD);
 		}
 	}
 
-	if (vsync2 > 0) {
+	if (d3d->vsync2 > 0) {
 		vsync2_cnt ^= 1;
 		if (vsync2_cnt == 0)
 			return true;
 	}
 
-	D3D_render2 ();
-	flushgpu (immediate);
+	D3D_render2 (d3d, mode);
+	flushgpu (d3d, immediate);
 
 	return true;
 }
 
-void D3D_showframe (void)
+static void xD3D_showframe (int monid)
 {
-	if (!isd3d ())
+	struct d3dstruct *d3d = &d3ddata[monid];
+
+	if (!isd3d (d3d))
 		return;
 	if (currprefs.turbo_emulation) {
-		if (!(dpp.PresentationInterval & D3DPRESENT_INTERVAL_IMMEDIATE) && wasstilldrawing_broken) {
+		if ((!(d3d->dpp.PresentationInterval & D3DPRESENT_INTERVAL_IMMEDIATE) || d3d->variablerefresh) && d3d->wasstilldrawing_broken) {
 			static int frameskip;
 			if (currprefs.turbo_emulation && frameskip-- > 0)
 				return;
-			frameskip = 50;
+			frameskip = 10;
 		}
-		D3D_showframe2 (false);
+		D3D_showframe2 (d3d, false);
 	} else {
-		D3D_showframe2 (true);
-		if (vsync2 == -1 && !currprefs.turbo_emulation) {
-			D3D_showframe2 (true);
+		D3D_showframe2 (d3d, true);
+		if (d3d->vsync2 == -1 && !currprefs.turbo_emulation) {
+			D3D_showframe2 (d3d ,true);
 		}
+		flushgpu(d3d, true);
 	}
-	flushgpu (true);
 }
 
-void D3D_showframe_special (int mode)
+static void xD3D_showframe_special (int monid, int mode)
 {
+	struct d3dstruct *d3d = &d3ddata[monid];
+
 	HRESULT hr;
-	if (!isd3d ())
+	if (!isd3d (d3d))
 		return;
 	if (currprefs.turbo_emulation)
 		return;
-	hr = d3ddev->Clear (0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, d3ddebug ? 0x80 : 0, 0), 0, 0);
-	D3D_showframe2 (true);
-	flushgpu (true);
+	if (pause_emulation)
+		return;
+	if (mode == 2) {
+		hr = d3d->d3ddev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, d3ddebug ? 0x80 : 0, 0), 0, 0);
+	}
+	if (mode == 1) {
+		D3D_showframe2(d3d, true);
+	}
+	flushgpu(d3d, true);
 }
 
-void D3D_refresh (void)
+static void xD3D_refresh (int monid)
 {
-	if (!isd3d ())
+	struct d3dstruct *d3d = &d3ddata[monid];
+
+	if (!isd3d (d3d))
 		return;
-	D3D_render2 ();
-	D3D_showframe2 (true);
-	D3D_render2 ();
-	D3D_showframe2 (true);
-	createscanlines (0);
+	createscanlines(d3d, 0);
+	for (int i = 0; i < 3; i++) {
+		D3D_render2(d3d, true);
+		D3D_showframe2(d3d, true);
+	}
 }
 
 void D3D_getpixelformat (int depth, int *rb, int *gb, int *bb, int *rs, int *gs, int *bs, int *ab, int *as, int *a)
@@ -3403,43 +4012,87 @@ void D3D_getpixelformat (int depth, int *rb, int *gb, int *bb, int *rs, int *gs,
 	}
 }
 
-double D3D_getrefreshrate (void)
+static float xD3D_getrefreshrate(int monid)
 {
+	struct d3dstruct *d3d = &d3ddata[monid];
 	HRESULT hr;
 	D3DDISPLAYMODE dmode;
 
-	waitfakemode ();
-	if (!isd3d ())
+	waitfakemode (d3d);
+	if (!isd3d (d3d))
 		return -1;
-	hr = d3ddev->GetDisplayMode (0, &dmode);
+	hr = d3d->d3ddev->GetDisplayMode (0, &dmode);
 	if (FAILED (hr))
 		return -1;
 	return dmode.RefreshRate;
 }
 
-void D3D_guimode (bool guion)
+static void xD3D_guimode(int monid, int guion)
 {
+	struct d3dstruct *d3d = &d3ddata[monid];
 	HRESULT hr;
 
-	waitfakemode ();
-	if (!isd3d ())
+	if (guion != 0 && guion != 1)
 		return;
-	hr = d3ddev->SetDialogBoxMode (guion ? TRUE : FALSE);
+
+	waitfakemode (d3d);
+	if (!isd3d (d3d))
+		return;
+	D3D_render2(d3d, true);
+	D3D_showframe2(d3d, true);
+	hr = d3d->d3ddev->SetDialogBoxMode (guion ? TRUE : FALSE);
 	if (FAILED (hr))
 		write_log (_T("%s: SetDialogBoxMode %s\n"), D3DHEAD, D3D_ErrorString (hr));
-	guimode = guion;
+	d3d->guimode = guion;
 }
 
-HDC D3D_getDC (HDC hdc)
+LPDIRECT3DSURFACE9 D3D_capture(int monid, int *w, int *h, int *bits, bool rendertarget)
 {
+	struct d3dstruct *d3d = &d3ddata[monid];
+	HRESULT hr;
+	LPDIRECT3DSURFACE9 ret = NULL;
+
+	waitfakemode(d3d);
+	if (!isd3d(d3d))
+		return NULL;
+	if (rendertarget) {
+		LPDIRECT3DSURFACE9 rt;
+		hr = d3d->d3ddev->GetRenderTarget(0, &rt);
+		if (FAILED(hr)) {
+			write_log(_T("%s: D3D_capture() GetRenderTarget() failed: %s\n"), D3DHEAD, D3D_ErrorString(hr));
+			return NULL;
+		}
+		hr = d3d->d3ddev->GetRenderTargetData(rt, d3d->screenshotsurface);
+		rt->Release();
+		if (FAILED(hr)) {
+			write_log(_T("%s: D3D_capture() GetRenderTargetData() failed: %s\n"), D3DHEAD, D3D_ErrorString(hr));
+			return NULL;
+		}
+		ret = d3d->screenshotsurface;
+	} else {
+		hr = d3d->texture->GetSurfaceLevel(0, &ret);
+		if (FAILED(hr)) {
+			write_log(_T("%s: D3D_capture() GetSurfaceLevel() failed: %s\n"), D3DHEAD, D3D_ErrorString(hr));
+			return NULL;
+		}
+	}
+	*w = d3d->window_w;
+	*h = d3d->window_h;
+	*bits = d3d->t_depth;
+	return ret;
+}
+
+static HDC xD3D_getDC(int monid, HDC hdc)
+{
+	struct d3dstruct *d3d = &d3ddata[monid];
 	static LPDIRECT3DSURFACE9 bb;
 	HRESULT hr;
 
-	waitfakemode ();
-	if (!isd3d ())
+	waitfakemode (d3d);
+	if (!isd3d (d3d))
 		return 0;
 	if (!hdc) {
-		hr = d3ddev->GetBackBuffer (0, 0, D3DBACKBUFFER_TYPE_MONO, &bb);
+		hr = d3d->d3ddev->GetBackBuffer (0, 0, D3DBACKBUFFER_TYPE_MONO, &bb);
 		if (FAILED (hr)) {
 			write_log (_T("%s: GetBackBuffer() failed: %s\n"), D3DHEAD, D3D_ErrorString (hr));
 			return 0;
@@ -3458,9 +4111,172 @@ HDC D3D_getDC (HDC hdc)
 	return 0;
 }
 
-int D3D_isenabled (void)
+static int xD3D_isenabled(int monid)
 {
-	return d3d_enabled;
+	struct d3dstruct *d3d = &d3ddata[monid];
+	return d3d->d3d_enabled ? 1 : 0;
+}
+
+static uae_u8 *xD3D_setcursorsurface(int monid, int *pitch)
+{
+	struct d3dstruct *d3d = &d3ddata[monid];
+	if (pitch) {
+		D3DLOCKED_RECT locked;
+		if (!d3d->cursorsurfaced3d)
+			return NULL;
+		HRESULT hr = d3d->cursorsurfaced3d->LockRect(0, &locked, NULL, 0);
+		if (FAILED(hr))
+			return NULL;
+		*pitch = locked.Pitch;
+		return (uae_u8*)locked.pBits;
+	} else {
+		d3d->cursorsurfaced3d->UnlockRect(0);
+		return NULL;
+	}
+}
+
+static bool xD3D_getscanline(int *scanline, bool *invblank)
+{
+	struct d3dstruct *d3d = &d3ddata[0];
+	HRESULT hr;
+	D3DRASTER_STATUS rt;
+
+	if (!isd3d(d3d))
+		return false;
+	if (d3d->d3dswapchain)
+		hr = d3d->d3dswapchain->GetRasterStatus(&rt);
+	else
+		hr = d3d->d3ddev->GetRasterStatus(0, &rt);
+	if (FAILED(hr))
+		return false;
+	*scanline = rt.ScanLine;
+	*invblank = rt.InVBlank != FALSE;
+	return true;
+}
+
+static bool xD3D_run(int monid)
+{
+	struct d3dstruct *d3d = &d3ddata[monid];
+	return false;
+}
+
+static bool xD3D_extoverlay(struct extoverlay *ext)
+{
+	struct d3dstruct *d3d = &d3ddata[0];
+	struct d3d9overlay *ov, *ovprev, *ov2;
+	LPDIRECT3DTEXTURE9 s;
+	D3DLOCKED_RECT locked;
+	HRESULT hr;
+
+	s = NULL;
+	ov = d3d->extoverlays;
+	ovprev = NULL;
+	while (ov) {
+		if (ov->id == ext->idx) {
+			s = ov->tex;
+			break;
+		}
+		ovprev = ov;
+		ov = ov->next;
+	}
+
+	write_log(_T("extoverlay %d: x=%d y=%d %d*%d data=%p ovl=%p\n"), ext->idx, ext->xpos, ext->ypos, ext->width, ext->height, ext->data, ov);
+
+	if (!s && (ext->width <= 0 || ext->height <= 0))
+		return false;
+
+	if (!ext->data && s && (ext->width == 0 || ext->height == 0)) {
+		ov->x = ext->xpos;
+		ov->y = ext->ypos;
+		return true;
+	}
+
+	if (ov && s) {
+		if (ovprev) {
+			ovprev->next = ov->next;
+		} else {
+			d3d->extoverlays = ov->next;
+		}
+		s->Release();
+		xfree(ov);
+		if (ext->width <= 0 || ext->height <= 0)
+			return true;
+	}
+
+	if (ext->width <= 0 || ext->height <= 0)
+		return false;
+
+	ov = xcalloc(d3d9overlay, 1);
+	s = createtext(d3d, ext->width, ext->height, D3DFMT_A8R8G8B8);
+	if (!s) {
+		xfree(ov);
+		return false;
+	}
+
+	ov->tex = s;
+	ov->id = ext->idx;
+
+	ov2 = d3d->extoverlays;
+	ovprev = NULL;
+	for (;;) {
+		if (ov2 == NULL || ov2->id >= ov->id) {
+			if (ov2 == d3d->extoverlays) {
+				d3d->extoverlays = ov;
+				ov->next = ov2;
+			} else {
+				ov->next = ovprev->next;
+				ovprev->next = ov;
+			}
+			break;
+		}
+		ovprev = ov2;
+		ov2 = ov2->next;
+	}
+
+	ov->x = ext->xpos;
+	ov->y = ext->ypos;
+
+	hr = s->LockRect(0, &locked, NULL, 0);
+	if (SUCCEEDED(hr)) {
+		for (int y = 0; y < ext->height; y++) {
+			memcpy((uae_u8*)locked.pBits + y * locked.Pitch, ext->data + y * ext->width * 4, ext->width * 4);
+		}
+		s->UnlockRect(0);
+	}
+
+	return true;
+}
+
+void d3d9_select(void)
+{
+	D3D_free = xD3D_free;
+	D3D_init = xD3D_init;
+	D3D_alloctexture = xD3D_alloctexture;
+	D3D_refresh = xD3D_refresh;
+	D3D_renderframe = xD3D_renderframe;
+	D3D_showframe = xD3D_showframe;
+	D3D_showframe_special = xD3D_showframe_special;
+	D3D_locktexture = xD3D_locktexture;
+	D3D_unlocktexture = xD3D_unlocktexture;
+	D3D_flushtexture = xD3D_flushtexture;
+	D3D_guimode = xD3D_guimode;
+	D3D_getDC = xD3D_getDC;
+	D3D_isenabled = xD3D_isenabled;
+	D3D_clear = xD3D_clear;
+	D3D_canshaders = xD3D_canshaders;
+	D3D_goodenough = xD3D_goodenough;
+	D3D_setcursor = xD3D_setcursor;
+	D3D_setcursorsurface = xD3D_setcursorsurface;
+	D3D_getrefreshrate = xD3D_getrefreshrate;
+	D3D_restore = xD3D_restore;
+	D3D_resize = NULL;
+	D3D_change = NULL;
+	D3D_getscalerect = xD3D_getscalerect;
+	D3D_run = xD3D_run;
+	D3D_debug = xD3D_debug;
+	D3D_led = xD3D_led;
+	D3D_getscanline = xD3D_getscanline;
+	D3D_extoverlay = xD3D_extoverlay;
 }
 
 #endif

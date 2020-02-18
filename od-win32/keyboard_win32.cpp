@@ -43,6 +43,11 @@
 //#define DBG_KEYBD 1
 //#define DEBUG_KBD
 
+#ifndef DIK_PREVTRACK
+/* Not defined by MinGW */
+#define DIK_PREVTRACK 0x90
+#endif
+
 static struct uae_input_device_kbr_default keytrans_amiga[] = {
 
 	{ DIK_ESCAPE, INPUTEVENT_KEY_ESC },
@@ -81,7 +86,7 @@ static struct uae_input_device_kbr_default keytrans_amiga[] = {
 	{ DIK_G, INPUTEVENT_KEY_G },
 	{ DIK_H, INPUTEVENT_KEY_H },
 	{ DIK_I, INPUTEVENT_KEY_I },
-	{ DIK_J, INPUTEVENT_KEY_J },
+	{ DIK_J, INPUTEVENT_KEY_J, 0, INPUTEVENT_SPC_SWAPJOYPORTS, ID_FLAG_QUALIFIER_SPECIAL },
 	{ DIK_K, INPUTEVENT_KEY_K },
 	{ DIK_L, INPUTEVENT_KEY_L },
 	{ DIK_M, INPUTEVENT_KEY_M },
@@ -139,7 +144,7 @@ static struct uae_input_device_kbr_default keytrans_amiga[] = {
 	{ DIK_LEFT, INPUTEVENT_KEY_CURSOR_LEFT },
 	{ DIK_RIGHT, INPUTEVENT_KEY_CURSOR_RIGHT },
 
-	{ DIK_INSERT, INPUTEVENT_KEY_AMIGA_LEFT },
+	{ DIK_INSERT, INPUTEVENT_KEY_AMIGA_LEFT, 0, INPUTEVENT_SPC_PASTE, ID_FLAG_QUALIFIER_SPECIAL },
 	{ DIK_DELETE, INPUTEVENT_KEY_DEL },
 	{ DIK_HOME, INPUTEVENT_KEY_AMIGA_RIGHT },
 	{ DIK_NEXT, INPUTEVENT_KEY_HELP },
@@ -158,7 +163,8 @@ static struct uae_input_device_kbr_default keytrans_amiga[] = {
 	{ DIK_SYSRQ, INPUTEVENT_SPC_SCREENSHOT_CLIPBOARD, 0, INPUTEVENT_SPC_SCREENSHOT, ID_FLAG_QUALIFIER_SPECIAL },
 
 	{ DIK_END, INPUTEVENT_SPC_QUALIFIER_SPECIAL },
-	{ DIK_PAUSE, INPUTEVENT_SPC_PAUSE, 0, INPUTEVENT_SPC_WARP, ID_FLAG_QUALIFIER_SPECIAL, INPUTEVENT_SPC_IRQ7, ID_FLAG_QUALIFIER_SPECIAL | ID_FLAG_QUALIFIER_SHIFT },
+	{ DIK_PAUSE, INPUTEVENT_SPC_PAUSE, 0, INPUTEVENT_SPC_SINGLESTEP, ID_FLAG_QUALIFIER_SPECIAL | ID_FLAG_QUALIFIER_CONTROL, INPUTEVENT_SPC_IRQ7, ID_FLAG_QUALIFIER_SPECIAL | ID_FLAG_QUALIFIER_SHIFT, INPUTEVENT_SPC_WARP, ID_FLAG_QUALIFIER_SPECIAL },
+	{ DIK_PAUSE+1, INPUTEVENT_SPC_SINGLESTEP, ID_FLAG_QUALIFIER_SPECIAL | ID_FLAG_QUALIFIER_CONTROL, INPUTEVENT_SPC_IRQ7, ID_FLAG_QUALIFIER_SPECIAL | ID_FLAG_QUALIFIER_SHIFT },
 
 	{ DIK_F12, INPUTEVENT_SPC_ENTERGUI, 0, INPUTEVENT_SPC_ENTERDEBUGGER, ID_FLAG_QUALIFIER_SPECIAL, INPUTEVENT_SPC_ENTERDEBUGGER, ID_FLAG_QUALIFIER_SHIFT, INPUTEVENT_SPC_TOGGLEDEFAULTSCREEN, ID_FLAG_QUALIFIER_CONTROL },
 
@@ -315,15 +321,12 @@ static int kb_cd32_se[] = { DIK_A, -1, DIK_D, -1, DIK_W, -1, DIK_S, -1, -1, DIK_
 
 static int kb_cdtv[] = { DIK_NUMPAD1, -1, DIK_NUMPAD3, -1, DIK_NUMPAD7, -1, DIK_NUMPAD9, -1, -1 };
 
-static int kb_xa1[] = { DIK_NUMPAD4, -1, DIK_NUMPAD6, -1, DIK_NUMPAD8, -1, DIK_NUMPAD2, DIK_NUMPAD5, -1, DIK_LCONTROL, -1, DIK_LMENU, -1, DIK_SPACE, -1, -1 };
-static int kb_xa2[] = { DIK_D, -1, DIK_G, -1, DIK_R, -1, DIK_F, -1, DIK_A, -1, DIK_S, -1, DIK_Q, -1 };
 static int kb_arcadia[] = { DIK_F2, -1, DIK_1, -1, DIK_2, -1, DIK_5, -1, DIK_6, -1, -1 };
-static int kb_arcadiaxa[] = { DIK_1, -1, DIK_2, -1, DIK_3, -1, DIK_4, -1, DIK_6, -1, DIK_LBRACKET, DIK_LSHIFT, -1, DIK_RBRACKET, -1, DIK_C, -1, DIK_5, -1, DIK_Z, -1, DIK_X, -1, -1 };
 
 static int *kbmaps[] = {
 	kb_np, kb_ck, kb_se, kb_np3, kb_ck3, kb_se3,
 	kb_cd32_np, kb_cd32_ck, kb_cd32_se,
-	kb_xa1, kb_xa2, kb_arcadia, kb_arcadiaxa, kb_cdtv
+	kb_arcadia, kb_cdtv
 };
 
 static bool specialpressed (void)
@@ -384,7 +387,7 @@ static const int np[] = {
 	DIK_NUMPAD3, 3, DIK_NUMPAD4, 4, DIK_NUMPAD5, 5, DIK_NUMPAD6, 6, DIK_NUMPAD7, 7,
 	DIK_NUMPAD8, 8, DIK_NUMPAD9, 9, -1 };
 
-void my_kbd_handler (int keyboard, int scancode, int newstate)
+bool my_kbd_handler (int keyboard, int scancode, int newstate, bool alwaysrelease)
 {
 	int code = 0;
 	int scancode_new;
@@ -401,11 +404,20 @@ void my_kbd_handler (int keyboard, int scancode, int newstate)
 #if 0
 	if (scancode == DIK_F1) {
 		if (newstate) {
-			extern int paska;
-			paska++;
+			char msg[20000];
+			FILE *f = fopen("test.txt", "rb");
+			memset(msg, 0, sizeof msg);
+			fread(msg, 1, sizeof msg, f);
+			void parse_guest_event(const TCHAR *ss);
+			TCHAR *txt = au(msg);
+			parse_guest_event(txt);
+			free(txt);
+			fclose(f);
 		}
-		return;
+		return true;
 	}
+#endif
+#if 0
 	if (scancode == DIK_F2) {
 		if (newstate) {
 			extern int paska;
@@ -415,13 +427,21 @@ void my_kbd_handler (int keyboard, int scancode, int newstate)
 	}
 #endif
 
-	if (amode && scancode == DIK_F11 && currprefs.win32_ctrl_F11_is_quit && ctrlpressed ())
-		code = AKS_QUIT;
+	if (amode && scancode == DIK_F11 && currprefs.win32_ctrl_F11_is_quit && ctrlpressed()) {
+		if (!quit_ok())
+			return true;
+		uae_quit();
+		return true;
+	}
 
 	if (scancode == DIK_F9 && specialpressed ()) {
-		if (newstate)
-			toggle_rtg (-1);
-		return;
+		extern bool toggle_3d_debug(void);
+		if (newstate) {
+			if (!toggle_3d_debug()) {
+				toggle_rtg(0, MAX_RTG_BOARDS + 1);
+			}
+		}
+		return true;
 	}
 
 	scancode_new = scancode;
@@ -432,18 +452,18 @@ void my_kbd_handler (int keyboard, int scancode, int newstate)
 		int defaultguikey = amode ? DIK_F12 : DIK_NUMLOCK;
 		if (currprefs.win32_guikey >= 0x100) {
 			if (scancode_new == DIK_F12)
-				return;
-		} else if (currprefs.win32_guikey >= 0) {
+				return true;
+		} else if (currprefs.win32_guikey > 0) {
 			if (scancode_new == defaultguikey && currprefs.win32_guikey != scancode_new) {
 				scancode = 0;
 				if (specialpressed () && ctrlpressed() && shiftpressed() && altpressed ())
-					inputdevice_add_inputcode (AKS_ENTERGUI, 1);
+					inputdevice_add_inputcode (AKS_ENTERGUI, 1, NULL);
 			} else if (scancode_new == currprefs.win32_guikey ) {
-				inputdevice_add_inputcode (AKS_ENTERGUI, 1);
+				inputdevice_add_inputcode (AKS_ENTERGUI, 1, NULL);
 				scancode = 0;
 			}
-		} else if (!specialpressed () && !ctrlpressed() && !shiftpressed() && !altpressed () && scancode_new == defaultguikey) {
-			inputdevice_add_inputcode (AKS_ENTERGUI, 1);
+		} else if (currprefs.win32_guikey != 0 && !specialpressed () && !ctrlpressed() && !shiftpressed() && !altpressed () && scancode_new == defaultguikey) {
+			inputdevice_add_inputcode (AKS_ENTERGUI, 1, NULL);
 			scancode = 0;
 		}
 	}
@@ -601,8 +621,8 @@ void my_kbd_handler (int keyboard, int scancode, int newstate)
 	}
 
 	if (code) {
-		inputdevice_add_inputcode (code, 1);
-		return;
+		inputdevice_add_inputcode (code, 1, NULL);
+		return true;
 	}
 
 
@@ -624,10 +644,10 @@ void my_kbd_handler (int keyboard, int scancode, int newstate)
 
 	if (special) {
 		inputdevice_checkqualifierkeycode (keyboard, scancode, newstate);
-		return;
+		return true;
 	}
 
-	inputdevice_translatekeycode (keyboard, scancode, newstate);
+	return inputdevice_translatekeycode (keyboard, scancode, newstate, alwaysrelease) != 0;
 }
 
 void keyboard_settrans (void)

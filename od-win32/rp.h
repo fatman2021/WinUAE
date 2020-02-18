@@ -18,6 +18,11 @@ extern void rp_vsync (void);
 extern HWND rp_getparent (void);
 extern void rp_rtg_switch (void);
 extern void rp_screenmode_changed (void);
+extern void rp_keymap(TrapContext*, uaecptr, uae_u32);
+extern USHORT rp_rawbuttons(LPARAM lParam, USHORT usButtonFlags);
+extern bool rp_mouseevent(int x, int y, int buttons, int buttonmask);
+extern bool rp_ismouseevent(void);
+extern void rp_reset(void);
 
 extern TCHAR *rp_param;
 extern int rp_rpescapekey;
@@ -33,7 +38,7 @@ extern void rp_cd_image_change (int num, const TCHAR *name);
 
 extern void rp_update_gameport (int port, int mask, int onoff);
 extern void rp_update_volume (struct uae_prefs*);
-extern void rp_update_leds (int, int, int);
+extern void rp_update_leds (int, int, int, int);
 extern void rp_floppy_track (int floppy, int track);
 extern void rp_hd_activity (int, int, int);
 extern void rp_cd_activity (int, int);

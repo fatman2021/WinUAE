@@ -31,7 +31,7 @@
 #include "traps.h"
 #include "threaddep/thread.h"
 #include "native2amiga.h"
-#include "od-win32/win32.h"
+#include "win32.h"
 #include "sounddep/sound.h"
 #include "ahidsound_new.h"
 #include "dxwrap.h"
@@ -433,7 +433,7 @@ static uae_u32 gettag (uae_u32 *tagpp, uae_u32 *datap)
 			tagp = data;
 			break;
 		case TAG_SKIP:
-			tagp += data * 8;
+			tagp += (data + 1) * 8;
 			break;
 		default:
 			tagp += 8;
@@ -1164,7 +1164,7 @@ static int unqueuebuffers (struct dschannel *dc)
 	}
 }
 
-void ahi_hsync (void)
+static void ahi_hsync (void)
 {
 	struct DSAHI *dsahip = &dsahi[0];
 	static int cnt;

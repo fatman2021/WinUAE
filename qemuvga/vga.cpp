@@ -835,6 +835,8 @@ uint32_t vga_mem_readb(VGACommonState *s, hwaddr addr)
 //            return 0xff;
         break;
     }
+	if (addr >= s->vram_size)
+		return 0xff;
 
     if (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) {
         /* chain 4 mode : simplest access */
@@ -895,6 +897,8 @@ void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
 //            return;
         break;
     }
+	if (addr >= s->vram_size)
+		return;
 
     if (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) {
         /* chain 4 mode : simplest access */
@@ -906,7 +910,7 @@ void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
             write_log("vga: chain4: [0x" TARGET_FMT_plx "]\n", addr);
 #endif
             s->plane_updated |= mask; /* only used to detect font change */
-            memory_region_set_dirty(&s->vram, addr, 1);
+            vga_memory_region_set_dirty(&s->vram, addr, 1);
         }
     } else if (s->gr[VGA_GFX_MODE] & 0x10) {
         /* odd/even mode (aka text mode mapping) */
@@ -919,7 +923,7 @@ void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
             write_log("vga: odd/even: [0x" TARGET_FMT_plx "]\n", addr);
 #endif
             s->plane_updated |= mask; /* only used to detect font change */
-            memory_region_set_dirty(&s->vram, addr, 1);
+            vga_memory_region_set_dirty(&s->vram, addr, 1);
         }
     } else {
         /* standard VGA latched access */
@@ -994,7 +998,7 @@ void vga_mem_writeb(VGACommonState *s, hwaddr addr, uint32_t val)
         write_log("vga: latch: [0x" TARGET_FMT_plx "] mask=0x%08x val=0x%08x\n",
                addr * 4, write_mask, val);
 #endif
-        memory_region_set_dirty(&s->vram, addr << 2, sizeof(uint32_t));
+        vga_memory_region_set_dirty(&s->vram, addr << 2, sizeof(uint32_t));
     }
 }
 
@@ -1191,6 +1195,11 @@ static int update_basic_params(VGACommonState *s)
         s->line_compare = line_compare;
         full_update = 1;
     }
+	if (s->ovl_changed) {
+		full_update = 1;
+		s->ovl_changed = 0;
+	}
+
     return full_update;
 }
 
@@ -1365,6 +1374,9 @@ static void vga_draw_text(VGACommonState *s, int full_update)
         return;
     }
 
+	if (full_update)
+		qemu_console_resize(s->con, s->last_scr_width, s->last_scr_height);
+
     if (width != s->last_width || height != s->last_height ||
         cw != s->last_cw || cheight != s->last_ch || s->last_depth) {
         s->last_scr_width = width * cw;
@@ -1512,11 +1524,15 @@ enum {
     VGA_DRAW_LINE4D2,
     VGA_DRAW_LINE8D2,
     VGA_DRAW_LINE8,
-    VGA_DRAW_LINE15,
-    VGA_DRAW_LINE16,
-    VGA_DRAW_LINE24,
-    VGA_DRAW_LINE32,
-    VGA_DRAW_LINE_NB,
+	VGA_DRAW_LINE15,
+	VGA_DRAW_LINE15X2,
+	VGA_DRAW_LINE16,
+	VGA_DRAW_LINE16X2,
+	VGA_DRAW_LINE24,
+	VGA_DRAW_LINE24X2,
+	VGA_DRAW_LINE32,
+	VGA_DRAW_LINE32X2,
+	VGA_DRAW_LINE_NB,
 };
 
 static vga_draw_line_func * const vga_draw_line_table[NB_DEPTHS * VGA_DRAW_LINE_NB] = {
@@ -1568,37 +1584,69 @@ static vga_draw_line_func * const vga_draw_line_table[NB_DEPTHS * VGA_DRAW_LINE_
     vga_draw_line8_16,
     vga_draw_line8_16,
 
-    vga_draw_line15_8,
-    vga_draw_line15_15,
-    vga_draw_line15_16,
-    vga_draw_line15_32,
-    vga_draw_line15_32bgr,
-    vga_draw_line15_15bgr,
-    vga_draw_line15_16bgr,
+	vga_draw_line15_8,
+	vga_draw_line15_15,
+	vga_draw_line15_16,
+	vga_draw_line15_32,
+	vga_draw_line15_32bgr,
+	vga_draw_line15_15bgr,
+	vga_draw_line15_16bgr,
 
-    vga_draw_line16_8,
-    vga_draw_line16_15,
-    vga_draw_line16_16,
-    vga_draw_line16_32,
-    vga_draw_line16_32bgr,
-    vga_draw_line16_15bgr,
-    vga_draw_line16_16bgr,
+	vga_draw_line15x2_8,
+	vga_draw_line15x2_15,
+	vga_draw_line15x2_16,
+	vga_draw_line15x2_32,
+	vga_draw_line15x2_32bgr,
+	vga_draw_line15x2_15bgr,
+	vga_draw_line15x2_16bgr,
 
-    vga_draw_line24_8,
-    vga_draw_line24_15,
-    vga_draw_line24_16,
-    vga_draw_line24_32,
-    vga_draw_line24_32bgr,
-    vga_draw_line24_15bgr,
-    vga_draw_line24_16bgr,
+	vga_draw_line16_8,
+	vga_draw_line16_15,
+	vga_draw_line16_16,
+	vga_draw_line16_32,
+	vga_draw_line16_32bgr,
+	vga_draw_line16_15bgr,
+	vga_draw_line16_16bgr,
 
-    vga_draw_line32_8,
-    vga_draw_line32_15,
-    vga_draw_line32_16,
-    vga_draw_line32_32,
-    vga_draw_line32_32bgr,
-    vga_draw_line32_15bgr,
-    vga_draw_line32_16bgr,
+	vga_draw_line16x2_8,
+	vga_draw_line16x2_15,
+	vga_draw_line16x2_16,
+	vga_draw_line16x2_32,
+	vga_draw_line16x2_32bgr,
+	vga_draw_line16x2_15bgr,
+	vga_draw_line16x2_16bgr,
+
+	vga_draw_line24_8,
+	vga_draw_line24_15,
+	vga_draw_line24_16,
+	vga_draw_line24_32,
+	vga_draw_line24_32bgr,
+	vga_draw_line24_15bgr,
+	vga_draw_line24_16bgr,
+
+	vga_draw_line24x2_8,
+	vga_draw_line24x2_15,
+	vga_draw_line24x2_16,
+	vga_draw_line24x2_32,
+	vga_draw_line24x2_32bgr,
+	vga_draw_line24x2_15bgr,
+	vga_draw_line24x2_16bgr,
+
+	vga_draw_line32_8,
+	vga_draw_line32_15,
+	vga_draw_line32_16,
+	vga_draw_line32_32,
+	vga_draw_line32_32bgr,
+	vga_draw_line32_15bgr,
+	vga_draw_line32_16bgr,
+
+	vga_draw_line32x2_8,
+    vga_draw_line32x2_15,
+    vga_draw_line32x2_16,
+    vga_draw_line32x2_32,
+    vga_draw_line32x2_32bgr,
+    vga_draw_line32x2_15bgr,
+    vga_draw_line32x2_16bgr,
 };
 
 static int vga_get_bpp(VGACommonState *s)
@@ -1668,7 +1716,7 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
     int width, height, shift_control, line_offset, bwidth, bits;
     ram_addr_t page0, page1, page_min, page_max;
     int disp_width, multi_scan, multi_run;
-    uint8_t *d;
+    uint8_t *d, *d2;
     uint32_t v, addr1, addr;
     vga_draw_line_func *vga_draw_line;
 #if defined(HOST_WORDS_BIGENDIAN) == defined(TARGET_WORDS_BIGENDIAN)
@@ -1720,6 +1768,8 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
     }
 
     depth = s->get_bpp(s);
+	if (full_update)
+		qemu_console_resize(s->con, disp_width, height);
     if (s->line_offset != s->last_line_offset ||
         disp_width != s->last_width ||
         height != s->last_height ||
@@ -1779,24 +1829,24 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
             break;
         case 8:
             full_update |= update_palette256(s);
-            v = VGA_DRAW_LINE8;
+            v = s->double_scan2 ? VGA_DRAW_LINE8D2 : VGA_DRAW_LINE8;
             bits = 8;
             break;
         case 15:
-            v = VGA_DRAW_LINE15;
-            bits = 16;
+			v = s->double_scan2 ? VGA_DRAW_LINE15X2 : VGA_DRAW_LINE15;
+			bits = 16;
             break;
         case 16:
-            v = VGA_DRAW_LINE16;
-            bits = 16;
+			v = s->double_scan2 ? VGA_DRAW_LINE16X2 : VGA_DRAW_LINE16;
+			bits = 16;
             break;
         case 24:
-            v = VGA_DRAW_LINE24;
-            bits = 24;
+			v = s->double_scan2 ? VGA_DRAW_LINE24X2 : VGA_DRAW_LINE24;
+			bits = 24;
             break;
         case 32:
-            v = VGA_DRAW_LINE32;
-            bits = 32;
+			v = s->double_scan2 ? VGA_DRAW_LINE32X2 : VGA_DRAW_LINE32;
+			bits = 32;
             break;
         }
     }
@@ -1822,7 +1872,8 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
     d = surface_data(surface);
 	if (!d)
 		return;
-    linesize = surface_stride(surface);
+	d2 = d;
+	linesize = surface_stride(surface);
     y1 = 0;
     for(y = 0; y < height; y++) {
         addr = addr1;
@@ -1838,7 +1889,7 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
 
         update = full_update;
 
-		if (addr + width < s->vram_size) {
+		if (addr + bwidth < s->vram_size) {
 			page0 = addr;
 			page1 = addr + bwidth - 1;
 			update |= memory_region_get_dirty(&s->vram, page0, page1 - page0,
@@ -1881,6 +1932,125 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
             addr1 = 0;
         d += linesize;
     }
+
+	// video window (overlay)
+	if ((s->cr[0x3e] & 1) && bits >= 8) {
+
+		void copyrow_scale(int monid, uint8_t *src, uint8_t *src_screen, uint8_t *dst,
+			int sx, int sy, int sxadd, int width, int srcbytesperrow, int srcpixbytes,
+			int screenbytesperrow, int screenpixbytes,
+			int dx, int dy, int dstwidth, int dstheight, int dstbytesperrow, int dstpixbytes,
+			bool ck, uint32_t colorkey,
+			int convert_mode, uint32_t *p96_rgbx16p, uint32_t *clut, bool yuv_swap);
+		void alloc_colors_picasso(int rw, int gw, int bw, int rs, int gs, int bs, int rgbfmt, uint32_t *rgbx16);
+		int getconvert(int rgbformat, int pixbytes);
+
+		int outbpp = surface_bits_per_pixel(surface) / 8;
+		uint32_t format = (s->cr[0x3e] >> 1) & 7;
+		bool clutmode = false;
+
+		if (!s->cirrus_rgbx16) {
+			s->cirrus_rgbx16 = (uint32_t*)malloc(65536 * 4);
+		}
+		int convert = 0;
+		switch (format)
+		{
+			case 0: // YUV422
+				convert = 14;
+			break;
+			case 1: // YUV411
+				convert = 15;
+			break;
+			case 2: // CLUT
+				clutmode = 1;
+				convert = 1;
+			break;
+			default: // RGB
+				convert = 5;
+			break;
+		}
+		convert = getconvert(convert, outbpp);
+
+		int ovl_format = 5;
+		if (s->old_ovl_format != ovl_format) {
+			alloc_colors_picasso(8, 8, 8, 16, 8, 0, ovl_format, s->cirrus_rgbx16);
+			s->old_ovl_format = ovl_format;
+		}
+
+		uint32_t gfxbpp = bits;
+		uint32_t vptr = ((s->cr[0x3c] & 15) << 18) | (s->cr[0x3b] << 10) | (s->cr[0x3a] << 2) | ((s->cr[0x5d] >> 2) & 3);
+		uint32_t bytesperrow = (((s->cr[0x3c] >> 5) & 1) << 11) | (s->cr[0x3d] << 3);
+		uint32_t r1sz = s->cr[0x33] | (((s->cr[0x36] >> 0) & 3) << 8);
+		uint32_t r1adjust = s->cr[0x5d] & 3;
+		uint32_t r2sz = s->cr[0x34] | (((s->cr[0x36] >> 2) & 3) << 8);
+		uint32_t r2adjust = (s->cr[0x5d] >> 4) & 3;
+		uint32_t r2dsz = s->cr[0x35] | (((s->cr[0x36] >> 4) & 3) << 8);
+		uint32_t wvs = s->cr[0x37] | (((s->cr[0x39] >> 0) & 3) << 8);
+		uint32_t wve = s->cr[0x38] | (((s->cr[0x39] >> 2) & 3) << 8);
+		bool occlusion = ((s->cr[0x3e] >> 7) & 1) != 0 && bits < 24;
+		uint32_t region1size = 32 * r1sz / gfxbpp + (r1adjust * 8 / gfxbpp);
+		uint32_t region2size = 32 * r2sz / gfxbpp + (r2adjust * 8 / gfxbpp);
+		uint32_t hzoom = s->cr[0x31];
+		uint32_t vzoom = s->cr[0x32];
+		uint32_t colorkey = 0;
+
+		int keymode = (s->cr[0x1d] >> 3) & 7;
+		// mask and chroma key ignored.
+		if (keymode == 0) {
+			colorkey = s->gr[0x0c];
+		} else if (keymode == 1) {
+			colorkey = s->gr[0x0c] | (s->gr[0x0d] << 8);
+		} else {
+			occlusion = false;
+		}
+
+		int overlaybpp = clutmode ? 1 : 2;
+		int overlay_width = overlaybpp * r2dsz;
+		int vertical_height = wve - wvs + 1;
+
+		if (clutmode) {
+			update_palette256(s);
+			overlay_width *= 4;
+		}
+
+		if (!hzoom)
+			hzoom = 256;
+		if (!vzoom)
+			vzoom = 256;
+
+		int y = 0;
+		for (int oy = 0; oy < vertical_height; oy++) {
+			if (vptr + (y >> 8) * bytesperrow > s->vram_size)
+				break;
+			if (s->start_addr * 4 + wvs * line_offset > s->vram_size)
+				break;
+			if (d2 + wvs * linesize > s->vram_ptr + s->vram_size)
+				break;
+			copyrow_scale(s->monid, s->vram_ptr + vptr, s->vram_ptr + s->start_addr * 4, d2,
+				0, y >> 8, hzoom, overlay_width, bytesperrow, overlaybpp,
+				line_offset, bits / 8,
+				region1size, wvs, width, height, linesize, outbpp,
+				occlusion, colorkey,
+				convert, s->cirrus_rgbx16, s->last_palette, false);
+			wvs++;
+			y += vzoom;
+		}
+
+		s->ovl_changed = 1;
+		s->old_overlay = 1;
+
+		if (y_start < 0 || y_start > wvs)
+			y_start = wvs;
+		if (y < wve)
+			y = wve + 1;
+
+	} else if (s->old_overlay) {
+
+		s->old_overlay = 0;
+		s->ovl_changed = 1;
+
+	}
+
     if (y_start >= 0) {
         /* flush to display */
         dpy_gfx_update(s->con, 0, y_start,

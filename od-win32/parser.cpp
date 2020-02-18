@@ -58,6 +58,8 @@
 #include "xwin.h"
 #include "drawing.h"
 
+#define GSDLLEXPORT __declspec(dllimport)
+
 #include <Ghostscript/iapi.h>
 #include <Ghostscript/ierrors.h>
 
@@ -84,28 +86,28 @@ static HMODULE gsdll;
 static void *gsinstance;
 static int gs_exitcode;
 
-typedef int (CALLBACK* GSAPI_REVISION)(gsapi_revision_t *pr, int len);
+typedef int (GSDLLAPI* GSAPI_REVISION)(gsapi_revision_t *pr, int len);
 static GSAPI_REVISION ptr_gsapi_revision;
-typedef int (CALLBACK* GSAPI_NEW_INSTANCE)(void **pinstance, void *caller_handle);
+typedef int (GSDLLAPI* GSAPI_NEW_INSTANCE)(void **pinstance, void *caller_handle);
 static GSAPI_NEW_INSTANCE ptr_gsapi_new_instance;
-typedef void (CALLBACK* GSAPI_DELETE_INSTANCE)(void *instance);
+typedef void (GSDLLAPI* GSAPI_DELETE_INSTANCE)(void *instance);
 static GSAPI_DELETE_INSTANCE ptr_gsapi_delete_instance;
-typedef int (CALLBACK* GSAPI_SET_STDIO)(void *instance,
+typedef int (GSDLLAPI* GSAPI_SET_STDIO)(void *instance,
 	int (GSDLLCALLPTR stdin_fn)(void *caller_handle, char *buf, int len),
 	int (GSDLLCALLPTR stdout_fn)(void *caller_handle, const char *str, int len),
 	int (GSDLLCALLPTR stderr_fn)(void *caller_handle, const char *str, int len));
 static GSAPI_SET_STDIO ptr_gsapi_set_stdio;
-typedef int (CALLBACK* GSAPI_INIT_WITH_ARGS)(void *instance, int argc, char **argv);
+typedef int (GSDLLAPI* GSAPI_INIT_WITH_ARGS)(void *instance, int argc, char **argv);
 static GSAPI_INIT_WITH_ARGS ptr_gsapi_init_with_args;
-
-typedef int (CALLBACK* GSAPI_EXIT)(void *instance);
+typedef int (GSDLLAPI* GSAPI_SET_ARG_ENCODING)(void *instance, int encoding);
+static GSAPI_SET_ARG_ENCODING ptr_gsapi_set_arg_encoding;
+typedef int (GSDLLAPI* GSAPI_EXIT)(void *instance);
 static GSAPI_EXIT ptr_gsapi_exit;
-
-typedef int (CALLBACK* GSAPI_RUN_STRING_BEGIN)(void *instance, int user_errors, int *pexit_code);
+typedef int (GSDLLAPI* GSAPI_RUN_STRING_BEGIN)(void *instance, int user_errors, int *pexit_code);
 static GSAPI_RUN_STRING_BEGIN ptr_gsapi_run_string_begin;
-typedef int (CALLBACK* GSAPI_RUN_STRING_CONTINUE)(void *instance, const char *str, unsigned int length, int user_errors, int *pexit_code);
+typedef int (GSDLLAPI* GSAPI_RUN_STRING_CONTINUE)(void *instance, const char *str, unsigned int length, int user_errors, int *pexit_code);
 static GSAPI_RUN_STRING_CONTINUE ptr_gsapi_run_string_continue;
-typedef int (CALLBACK* GSAPI_RUN_STRING_END)(void *instance, int user_errors, int *pexit_code);
+typedef int (GSDLLAPI* GSAPI_RUN_STRING_END)(void *instance, int user_errors, int *pexit_code);
 static GSAPI_RUN_STRING_END ptr_gsapi_run_string_end;
 
 static uae_u8 **psbuffer;
@@ -128,7 +130,7 @@ static void freepsbuffers (void)
 
 static int openprinter_ps (void)
 {
-	TCHAR *gsargv[] = {
+	const TCHAR *gsargv[] = {
 		_T("-dNOPAUSE"), _T("-dBATCH"), _T("-dNOPAGEPROMPT"), _T("-dNOPROMPT"), _T("-dQUIET"), _T("-dNoCancel"),
 		_T("-sDEVICE=mswinpr2"), NULL
 	};
@@ -139,24 +141,26 @@ static int openprinter_ps (void)
 
 	if (ptr_gsapi_new_instance (&gsinstance, NULL) < 0)
 		return 0;
+	ptr_gsapi_set_arg_encoding(gsinstance, GS_ARG_ENCODING_UTF8);
 	cmdlineparser (currprefs.ghostscript_parameters, tmpparms, 100 - 10);
 
 	gsargc2 = 0;
-	gsparms[gsargc2++] = ua (_T("WinUAE"));
+	gsparms[gsargc2++] = uutf8(_T("WinUAE"));
 	for (gsargc = 0; gsargv[gsargc]; gsargc++) {
-		gsparms[gsargc2++] = ua (gsargv[gsargc]);
+		gsparms[gsargc2++] = uutf8(gsargv[gsargc]);
 	}
 	for (i = 0; tmpparms[i]; i++)
-		gsparms[gsargc2++] = ua (tmpparms[i]);
+		gsparms[gsargc2++] = uutf8(tmpparms[i]);
 	if (currprefs.prtname[0]) {
 		_stprintf (tmp, _T("-sOutputFile=%%printer%%%s"), currprefs.prtname);
-		gsparms[gsargc2++] = ua (tmp);
+		gsparms[gsargc2++] = uutf8(tmp);
 	}
 	if (postscript_print_debugging) {
 		for (i = 0; i < gsargc2; i++) {
-			TCHAR *parm = au (gsparms[i]);
+			TCHAR *parm = utf8u(gsparms[i]);
 			write_log (_T("GSPARM%d: '%s'\n"), i, parm);
 			xfree (parm);
+			xfree(gsparms[i]);
 		}
 	}
 	__try {
@@ -212,10 +216,10 @@ static void *prt_thread (void *p)
 				ptr_gsapi_run_string_end (gsinstance, 0, &gs_exitcode);
 			}
 		} else {
-			write_log (_T("gsdll32.dll failed to initialize\n"));
+			write_log (_T("gsdllxx.dll failed to initialize\n"));
 		}
 	} else {
-		write_log (_T("gsdll32.dll failed to load\n"));
+		write_log (_T("gsdllxx.dll failed to load\n"));
 	}
 	unload_ghostscript ();
 	prt_running--;
@@ -437,10 +441,12 @@ int load_ghostscript (void)
 	ptr_gsapi_run_string_begin = (GSAPI_RUN_STRING_BEGIN)GetProcAddress (gsdll, "gsapi_run_string_begin");
 	ptr_gsapi_run_string_continue = (GSAPI_RUN_STRING_CONTINUE)GetProcAddress (gsdll, "gsapi_run_string_continue");
 	ptr_gsapi_run_string_end = (GSAPI_RUN_STRING_END)GetProcAddress (gsdll, "gsapi_run_string_end");
-	ptr_gsapi_init_with_args = (GSAPI_INIT_WITH_ARGS)GetProcAddress (gsdll, "gsapi_init_with_args");
+	ptr_gsapi_set_arg_encoding = (GSAPI_SET_ARG_ENCODING)GetProcAddress(gsdll, "gsapi_set_arg_encoding");
+	ptr_gsapi_init_with_args = (GSAPI_INIT_WITH_ARGS)GetProcAddress(gsdll, "gsapi_init_with_args");
+
 	if (!ptr_gsapi_new_instance || !ptr_gsapi_delete_instance || !ptr_gsapi_exit ||
 		!ptr_gsapi_run_string_begin || !ptr_gsapi_run_string_continue || !ptr_gsapi_run_string_end ||
-		!ptr_gsapi_init_with_args) {
+		!ptr_gsapi_set_arg_encoding || !ptr_gsapi_init_with_args) {
 			unload_ghostscript ();
 			write_log (_T("incompatible %s! (3)\n"), path);
 			return -3;
@@ -557,7 +563,7 @@ struct uaeserialdatawin32
 	void *user;
 };
 
-int uaeser_getdatalenght (void)
+int uaeser_getdatalength (void)
 {
 	return sizeof (struct uaeserialdatawin32);
 }
@@ -623,13 +629,13 @@ int uaeser_setparams (void *vsd, int baud, int rbuffer, int bits, int sbits, int
 
 	dcb.fDsrSensitivity = FALSE;
 	dcb.fOutxDsrFlow = FALSE;
-	dcb.fDtrControl = DTR_CONTROL_DISABLE;
+	dcb.fDtrControl = DTR_CONTROL_ENABLE;
 
 	if (rtscts) {
 		dcb.fOutxCtsFlow = TRUE;
 		dcb.fRtsControl = RTS_CONTROL_HANDSHAKE;
 	} else {
-		dcb.fRtsControl = RTS_CONTROL_DISABLE;
+		dcb.fRtsControl = RTS_CONTROL_ENABLE;
 		dcb.fOutxCtsFlow = FALSE;
 	}
 
@@ -647,9 +653,6 @@ int uaeser_setparams (void *vsd, int baud, int rbuffer, int bits, int sbits, int
 	dcb.fErrorChar = FALSE;
 	dcb.fNull = FALSE;
 	dcb.fAbortOnError = FALSE;
-
-	//dcb.XoffLim = 512;
-	//dcb.XonLim = 2048;
 
 	if (!SetCommState (sd->hCom, &dcb)) {
 		write_log (_T("uaeserial: SetCommState() failed %d\n"), GetLastError());
@@ -774,11 +777,11 @@ int uaeser_open (void *vsd, void *user, int unit)
 	sd->olw.hEvent = sd->evtw;
 	sd->olwce.hEvent = sd->evtwce;
 	sd->hCom = CreateFile (buf, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-		FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
+		FILE_FLAG_OVERLAPPED, NULL);
 	if (sd->hCom == INVALID_HANDLE_VALUE) {
 		_stprintf (buf, _T("\\.\\\\COM%d"), unit);
 		sd->hCom = CreateFile (buf, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-			FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
+			FILE_FLAG_OVERLAPPED, NULL);
 		if (sd->hCom == INVALID_HANDLE_VALUE) {
 			write_log (_T("UAESER: '%s' failed to open, err=%d\n"), buf, GetLastError());
 			goto end;
@@ -827,6 +830,7 @@ void uaeser_close (void *vsd)
 
 static HANDLE hCom = INVALID_HANDLE_VALUE;
 static DCB dcb;
+static DWORD fDtrControl = DTR_CONTROL_DISABLE, fRtsControl = RTS_CONTROL_DISABLE;
 static HANDLE writeevent, readevent;
 #define SERIAL_WRITE_BUFFER 100
 #define SERIAL_READ_BUFFER 100
@@ -1002,7 +1006,7 @@ int openser (const TCHAR *sername)
 		0,
 		NULL,
 		OPEN_EXISTING,
-		FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+		FILE_FLAG_OVERLAPPED,
 		NULL);
 	if (hCom == INVALID_HANDLE_VALUE) {
 		write_log (_T("SERIAL: failed to open '%s' err=%d\n"), sername, GetLastError());
@@ -1032,13 +1036,13 @@ int openser (const TCHAR *sername)
 
 	dcb.fDsrSensitivity = FALSE;
 	dcb.fOutxDsrFlow = FALSE;
-	dcb.fDtrControl = DTR_CONTROL_DISABLE;
+	dcb.fDtrControl = fDtrControl;
 
 	if (currprefs.serial_hwctsrts) {
 		dcb.fOutxCtsFlow = TRUE;
 		dcb.fRtsControl = RTS_CONTROL_HANDSHAKE;
 	} else {
-		dcb.fRtsControl = RTS_CONTROL_DISABLE;
+		dcb.fRtsControl = fRtsControl;
 		dcb.fOutxCtsFlow = FALSE;
 	}
 
@@ -1049,9 +1053,6 @@ int openser (const TCHAR *sername)
 	dcb.fErrorChar = FALSE;
 	dcb.fNull = FALSE;
 	dcb.fAbortOnError = FALSE;
-
-	//dcb.XoffLim = 512;
-	//dcb.XonLim = 2048;
 
 	if (SetCommState (hCom, &dcb)) {
 		write_log (_T("SERIAL: Using %s CTS/RTS=%d\n"), sername, currprefs.serial_hwctsrts);
@@ -1091,17 +1092,27 @@ void closeser (void)
 
 static void outser (void)
 {
-	DWORD actual;
-	if (datainoutput > 0 && WaitForSingleObject (writeevent, 0) == WAIT_OBJECT_0 ) {
+	if (datainoutput <= 0)
+		return;
+	DWORD v = WaitForSingleObject (writeevent, 0);
+	if (v == WAIT_OBJECT_0) {
+		DWORD actual;
 		memcpy (outputbufferout, outputbuffer, datainoutput);
 		WriteFile (hCom, outputbufferout, datainoutput, &actual, &writeol);
 		datainoutput = 0;
 	}
 }
 
+void writeser_flush(void)
+{
+	outser();
+}
+
 void writeser (int c)
 {
-	//write_log(_T("writeser %d (buf=%d)\n"), c, datainoutput);
+#if 0
+	write_log(_T("writeser %04X (buf=%d)\n"), c, datainoutput);
+#endif
 	if (tcpserial) {
 		if (tcp_is_connected ()) {
 			char buf[1];
@@ -1272,14 +1283,19 @@ void getserstat (int *pstatus)
 
 void setserstat (int mask, int onoff)
 {
-	if (!currprefs.use_serial || hCom == INVALID_HANDLE_VALUE)
-		return;
-
-	if (mask & TIOCM_DTR)
-		EscapeCommFunction (hCom, onoff ? SETDTR : CLRDTR);
+	if (mask & TIOCM_DTR) {
+		if (currprefs.use_serial && hCom != INVALID_HANDLE_VALUE) {
+			EscapeCommFunction(hCom, onoff ? SETDTR : CLRDTR);
+		}
+		fDtrControl = onoff ? DTR_CONTROL_ENABLE : DTR_CONTROL_DISABLE;
+	}
 	if (!currprefs.serial_hwctsrts) {
-		if (mask & TIOCM_RTS)
-			EscapeCommFunction (hCom, onoff ? SETRTS : CLRRTS);
+		if (mask & TIOCM_RTS) {
+			if (currprefs.use_serial && hCom != INVALID_HANDLE_VALUE) {
+				EscapeCommFunction(hCom, onoff ? SETRTS : CLRRTS);
+			}
+			fRtsControl = onoff ? RTS_CONTROL_ENABLE : RTS_CONTROL_DISABLE;
+		}
 	}
 }
 
@@ -1299,14 +1315,17 @@ int setbaud (long baud)
 		if (!currprefs.use_serial)
 			return 1;
 		if (hCom != INVALID_HANDLE_VALUE)  {
-			if (GetCommState (hCom, &dcb))  {
-				dcb.BaudRate = baud;
-				if (!SetCommState (hCom, &dcb)) {
-					write_log (_T("SERIAL: Error setting baud rate %d!\n"), baud);
-					return 0;
-				}
+			dcb.BaudRate = baud;
+			if (!currprefs.serial_hwctsrts) {
+				dcb.fRtsControl = fRtsControl;
 			} else {
-				write_log (_T("SERIAL: setbaud internal error!\n"));
+				dcb.fRtsControl = RTS_CONTROL_HANDSHAKE;
+			}
+			dcb.fDtrControl = fDtrControl;
+			write_log(_T("SERIAL: baud rate %d. DTR=%d RTS=%d\n"), baud, dcb.fDtrControl, dcb.fRtsControl);
+			if (!SetCommState (hCom, &dcb)) {
+				write_log (_T("SERIAL: Error setting baud rate %d!\n"), baud);
+				return 0;
 			}
 		}
 	}
@@ -1330,10 +1349,10 @@ int flashscreen;
 void doflashscreen (void)
 {
 	flashscreen = 10;
-	init_colors ();
-	picasso_refresh ();
+	init_colors(0);
+	picasso_refresh(0);
 	reset_drawing ();
-	flush_screen (gfxvidinfo.outbuffer, 0, 0);
+	//flush_screen (gfxvidinfo.outbuffer, 0, 0);
 }
 
 void hsyncstuff (void)
@@ -1366,10 +1385,10 @@ void hsyncstuff (void)
 			if (flashscreen > 0) {
 				flashscreen--;
 				if (flashscreen == 0) {
-					init_colors ();
+					init_colors(0);
 					reset_drawing ();
-					picasso_refresh ();
-					flush_screen (gfxvidinfo.outbuffer, 0, 0);
+					picasso_refresh(0);
+					//flush_screen (gfxvidinfo.outbuffer, 0, 0);
 				}
 			}
 		}
@@ -1569,11 +1588,15 @@ int enummidiports (void)
 	MIDIOUTCAPS midiOutCaps;
 	MIDIINCAPS midiInCaps;
 	int i, j, num, total;
+	int innum, outnum;
 	
-	write_log (_T("MIDI port enumeration..\n"));
-	num = midiOutGetNumDevs ();
+	outnum = midiOutGetNumDevs();
+	innum = midiInGetNumDevs();
+	write_log (_T("MIDI port enumeration.. IN=%d OUT=%d\n"), innum, outnum);
+
+	num = outnum;
 	for (i = 0; i < num + 1 && i < MAX_MIDI_PORTS - 1; i++) {
-		MMRESULT r = midiOutGetDevCaps (i - 1, &midiOutCaps, sizeof (midiOutCaps));
+		MMRESULT r = midiOutGetDevCaps ((UINT)(i - 1), &midiOutCaps, sizeof (midiOutCaps));
 		if (r != MMSYSERR_NOERROR) {
 			num = i;
 			break;
@@ -1594,8 +1617,7 @@ int enummidiports (void)
 			}
 		}
 	}
-
-	num = midiInGetNumDevs ();
+	num = innum;
 	for (i = 0; i < num && i < MAX_MIDI_PORTS - 1; i++) {
 		if (midiInGetDevCaps (i, &midiInCaps, sizeof (midiInCaps)) != MMSYSERR_NOERROR) {
 			num = i;

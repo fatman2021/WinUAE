@@ -1,3 +1,8 @@
+#ifndef UAE_SCSI_H
+#define UAE_SCSI_H
+
+#include "uae/types.h"
+#include "memory.h"
 
 #define SCSI_DEFAULT_DATA_BUFFER_SIZE (256 * 512)
 
@@ -16,40 +21,47 @@ struct scsi_data_tape
 	bool wp;
 	bool nomedia;
 	bool unloaded;
+	bool init_loaded;
+	bool pending_filemark;
+	bool last_filemark;
 };
 
 struct scsi_data
 {
-    int id;
+	int id;
 	void *privdata;
-    int cmd_len;
-    uae_u8 *data;
-    int data_len;
-    int status;
-    uae_u8 sense[256];
-    int sense_len;
-    uae_u8 reply[256];
-    uae_u8 cmd[16];
+	int cmd_len;
+	uae_u8 *data;
+	int data_len;
+	int status;
+	uae_u8 sense[256];
+	int sense_len;
+	uae_u8 reply[256];
+	uae_u8 cmd[16];
 	uae_u8 msgout[4];
-    int reply_len;
-    int direction;
+	int reply_len;
+	int direction;
 	uae_u8 message[1];
 	int blocksize;
 
-    int offset;
-    uae_u8 *buffer;
+	int offset;
+	uae_u8 *buffer;
 	int buffer_size;
-    struct hd_hardfiledata *hfd;
+	struct hd_hardfiledata *hdhfd;
+	struct hardfiledata *hfd;
 	struct scsi_data_tape *tape;
-    int device_type;
+	int device_type;
 	int nativescsiunit;
 	int cd_emu_unit;
 	bool atapi;
+	uae_u32 unit_attention;
+	int uae_unitnum;
 };
 
-extern struct scsi_data *scsi_alloc_hd(int, struct hd_hardfiledata*);
-extern struct scsi_data *scsi_alloc_cd(int, int, bool);
-extern struct scsi_data *scsi_alloc_tape(int id, const TCHAR *tape_directory, bool readonly);
+extern struct scsi_data *scsi_alloc_generic(struct hardfiledata *hfd, int type, int);
+extern struct scsi_data *scsi_alloc_hd(int, struct hd_hardfiledata*, int);
+extern struct scsi_data *scsi_alloc_cd(int, int, bool, int);
+extern struct scsi_data *scsi_alloc_tape(int id, const TCHAR *tape_directory, bool readonly, int);
 extern struct scsi_data *scsi_alloc_native(int, int);
 extern void scsi_free(struct scsi_data*);
 extern void scsi_reset(void);
@@ -60,6 +72,7 @@ extern int scsi_receive_data(struct scsi_data*, uae_u8*, bool next);
 extern void scsi_emulate_cmd(struct scsi_data *sd);
 extern void scsi_illegal_lun(struct scsi_data *sd);
 extern void scsi_clear_sense(struct scsi_data *sd);
+extern bool scsi_cmd_is_safe(uae_u8 cmd);
 
 extern int scsi_hd_emulate(struct hardfiledata *hfd, struct hd_hardfiledata *hdhfd, uae_u8 *cmdbuf, int scsi_cmd_len,
 		uae_u8 *scsi_data, int *data_len, uae_u8 *r, int *reply_len, uae_u8 *s, int *sense_len);
@@ -77,8 +90,9 @@ int add_scsi_hd (struct scsi_data **sd, int ch, struct hd_hardfiledata *hfd, str
 int add_scsi_cd (struct scsi_data **sd, int ch, int unitnum);
 int add_scsi_tape (struct scsi_data **sd, int ch, const TCHAR *tape_directory, bool readonly);
 void free_scsi (struct scsi_data *sd);
+bool tape_can_write(const TCHAR *tape_directory);
 
-void scsi_freenative(struct scsi_data **sd);
+void scsi_freenative(struct scsi_data **sd, int max);
 void scsi_addnative(struct scsi_data **sd);
 
 #define SCSI_NO_SENSE_DATA		0x00
@@ -125,106 +139,176 @@ void scsi_addnative(struct scsi_data **sd);
 #define SCSI_MEMORY_FUNCTIONS(x, y, z) \
 static void REGPARAM2 x ## _bput(uaecptr addr, uae_u32 b) \
 { \
-	y ## _bput(& ## z, addr, b); \
+	y ## _bput(&z, addr, b); \
 } \
 static void REGPARAM2 x ## _wput(uaecptr addr, uae_u32 b) \
 { \
-	y ## _wput(& ## z, addr, b); \
+	y ## _wput(&z, addr, b); \
 } \
 static void REGPARAM2 x ## _lput(uaecptr addr, uae_u32 b) \
 { \
-	y ## _lput(& ## z, addr, b); \
+	y ## _lput(&z, addr, b); \
 } \
 static uae_u32 REGPARAM2 x ## _bget(uaecptr addr) \
 { \
-return y ## _bget(& ## z, addr); \
+return y ## _bget(&z, addr); \
 } \
 static uae_u32 REGPARAM2 x ## _wget(uaecptr addr) \
 { \
-return y ## _wget(& ## z, addr); \
+return y ## _wget(&z, addr); \
 } \
 static uae_u32 REGPARAM2 x ## _lget(uaecptr addr) \
 { \
-return y ## _lget(& ## z, addr); \
+return y ## _lget(&z, addr); \
 }
 
 void soft_scsi_put(uaecptr addr, int size, uae_u32 v);
 uae_u32 soft_scsi_get(uaecptr addr, int size);
 
-void ncr80_rethink(void);
-
-void apollo_scsi_bput(uaecptr addr, uae_u8 v);
-uae_u8 apollo_scsi_bget(uaecptr addr);
+void apollo_scsi_bput(uaecptr addr, uae_u8 v, uae_u32 config);
+uae_u8 apollo_scsi_bget(uaecptr addr, uae_u32 config);
 void apollo_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-void soft_scsi_free(void);
-void soft_scsi_reset(void);
+void ivsvector_scsi_bput(uaecptr addr, uae_u8 v);
+uae_u8 ivsvector_scsi_bget(uaecptr addr);
+void ivsvector_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+bool ivsvector_init(struct autoconfig_info *aci);
+
+void twelvegauge_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+bool twelvegauge_init(struct autoconfig_info *aci);
 
 uae_u8 parallel_port_scsi_read(int reg, uae_u8 data, uae_u8 dir);
 void parallel_port_scsi_write(int reg, uae_u8 v, uae_u8 dir);
 extern bool parallel_port_scsi;
 
-addrbank *supra_init(struct romconfig*);
+bool supra_init(struct autoconfig_info*);
 void supra_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *golem_init(struct romconfig*);
+bool golem_init(struct autoconfig_info*);
 void golem_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *stardrive_init(struct romconfig*);
+bool stardrive_init(struct autoconfig_info*);
 void stardrive_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *kommos_init(struct romconfig*);
+bool kommos_init(struct autoconfig_info*);
 void kommos_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *vector_init(struct romconfig*);
+bool vector_init(struct autoconfig_info*);
 void vector_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *protar_init(struct romconfig *rc);
+bool protar_init(struct autoconfig_info *aci);
 void protar_add_ide_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *add500_init(struct romconfig *rc);
+bool add500_init(struct autoconfig_info *aci);
 void add500_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *kronos_init(struct romconfig *rc);
+bool kronos_init(struct autoconfig_info *aci);
 void kronos_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *adscsi_init(struct romconfig *rc);
+bool adscsi_init(struct autoconfig_info *aci);
 void adscsi_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool trifecta_init(struct autoconfig_info *aci);
+void trifecta_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
 void rochard_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 bool rochard_scsi_init(struct romconfig *rc, uaecptr baseaddress);
-uae_u8 rochard_scsi_get(uaecptr addr);
-void rochard_scsi_put(uaecptr addr, uae_u8 v);
 
-addrbank *cltda1000scsi_init(struct romconfig *rc);
+bool cltda1000scsi_init(struct autoconfig_info *aci);
 void cltda1000scsi_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *ptnexus_init(struct romconfig *rc);
+bool ptnexus_init(struct autoconfig_info *aci);
 void ptnexus_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *dataflyer_init(struct romconfig *rc);
+bool dataflyer_init(struct autoconfig_info *aci);
 void dataflyer_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *tecmar_init(struct romconfig *rc);
+bool dataflyerplus_scsi_init(struct romconfig *rc, uaecptr baseaddress);
+void dataflyerplus_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool tecmar_init(struct autoconfig_info *aci);
 void tecmar_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *xebec_init(struct romconfig *rc);
+bool xebec_init(struct autoconfig_info *aci);
 void xebec_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *microforge_init(struct romconfig *rc);
+bool microforge_init(struct autoconfig_info *aci);
 void microforge_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *paradox_init(struct romconfig *rc);
+bool paradox_init(struct autoconfig_info *aci);
 void paradox_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *hda506_init(struct romconfig *rc);
+bool hda506_init(struct autoconfig_info *aci);
 void hda506_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *alf1_init(struct romconfig *rc);
+bool alf1_init(struct autoconfig_info *aci);
 void alf1_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *promigos_init(struct romconfig *rc);
+bool promigos_init(struct autoconfig_info *aci);
 void promigos_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
 
-addrbank *system2000_init(struct romconfig *rc);
+bool system2000_preinit(struct autoconfig_info *aci);
+bool system2000_init(struct autoconfig_info *aci);
 void system2000_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool omtiadapter_init(struct autoconfig_info *aci);
+void omtiadapter_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool phoenixboard_init(struct autoconfig_info *aci);
+void phoenixboard_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool trumpcard_init(struct autoconfig_info*);
+void trumpcard_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool trumpcardpro_init(struct autoconfig_info*);
+void trumpcardpro_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool scram5380_init(struct autoconfig_info*);
+void scram5380_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool ossi_init(struct autoconfig_info*);
+void ossi_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool hardframe_init(struct autoconfig_info*);
+void hardframe_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool malibu_init(struct autoconfig_info*);
+void malibu_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool addhard_init(struct autoconfig_info*);
+void addhard_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool inmate_init(struct autoconfig_info*);
+void inmate_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool emplant_init(struct autoconfig_info*);
+void emplant_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool hd3000_init(struct autoconfig_info *aci);
+void hd3000_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool wedge_preinit(struct autoconfig_info *aci);
+bool wedge_init(struct autoconfig_info *aci);
+void wedge_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool eveshamref_init(struct autoconfig_info *aci);
+void eveshamref_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool profex_init(struct autoconfig_info *aci);
+void profex_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool fasttrak_init(struct autoconfig_info *aci);
+void fasttrak_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+bool overdrive_init(struct autoconfig_info *aci);
+void overdrive_add_scsi_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+uae_u8 idescsi_scsi_get(uaecptr addr);
+void idescsi_scsi_put(uaecptr addr, uae_u8 v);
+
+void x86_rt1000_bput(int, uae_u8);
+uae_u8 x86_rt1000_bget(int);
+bool x86_rt1000_init(struct autoconfig_info *aci);
+void x86_rt1000_add_unit(int ch, struct uaedev_config_info *ci, struct romconfig *rc);
+
+#endif /* UAE_SCSI_H */

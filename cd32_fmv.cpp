@@ -21,6 +21,7 @@
 #include "debug.h"
 #include "custom.h"
 #include "audio.h"
+#include "devices.h"
 #include "threaddep/thread.h"
 
 #include "cda_play.h"
@@ -227,6 +228,7 @@ static bool audio_mode;
 static uae_sem_t play_sem;
 static volatile bool fmv_bufon[2];
 static double fmv_syncadjust;
+static struct cd_audio_state cas;
 
 struct cl450_videoram
 {
@@ -287,9 +289,7 @@ static int isdebug(uaecptr addr)
 
 static void do_irq(void)
 {
-	if (!(intreq & 8)) {
-		INTREQ_0(0x8000 | 0x0008);
-	}
+	safe_interrupt_set(IRQ_SOURCE_CD32CDTV, 1, false);
 }
 
 static bool l64111_checkint(bool enabled)
@@ -321,29 +321,32 @@ static addrbank fmv_bank = {
 	fmv_lget, fmv_wget, fmv_bget,
 	fmv_lput, fmv_wput, fmv_bput,
 	default_xlate, default_check, NULL, NULL, _T("CD32 FMV IO"),
-	fmv_lget, fmv_wget, ABFLAG_IO
+	fmv_lget, fmv_wget,
+	ABFLAG_IO, S_READ, S_WRITE
 };
 
 DECLARE_MEMORY_FUNCTIONS(fmv_rom);
 static addrbank fmv_rom_bank = {
 	fmv_rom_lget, fmv_rom_wget, fmv_rom_bget,
 	fmv_rom_lput, fmv_rom_wput, fmv_rom_bput,
-	fmv_rom_xlate, fmv_rom_check, NULL, _T("fmv_rom"), _T("CD32 FMV ROM"),
-	fmv_rom_lget, fmv_rom_wget, ABFLAG_ROM
+	fmv_rom_xlate, fmv_rom_check, NULL, _T("*"), _T("CD32 FMV ROM"),
+	fmv_rom_lget, fmv_rom_wget,
+	ABFLAG_ROM, S_READ, S_WRITE
 };
 
 DECLARE_MEMORY_FUNCTIONS(fmv_ram);
 static addrbank fmv_ram_bank = {
 	fmv_ram_lget, fmv_ram_wget, fmv_ram_bget,
 	fmv_ram_lput, fmv_ram_wput, fmv_ram_bput,
-	fmv_ram_xlate, fmv_ram_check, NULL, _T("fmv_ram"), _T("CD32 FMV RAM"),
-	fmv_ram_lget, fmv_ram_wget, ABFLAG_RAM
+	fmv_ram_xlate, fmv_ram_check, NULL, _T("*"), _T("CD32 FMV RAM"),
+	fmv_ram_lget, fmv_ram_wget,
+	ABFLAG_RAM, S_READ, S_WRITE
 };
 
-MEMORY_FUNCTIONS_NOJIT(fmv_rom);
-MEMORY_FUNCTIONS_NOJIT(fmv_ram);
+MEMORY_FUNCTIONS(fmv_rom);
+MEMORY_FUNCTIONS(fmv_ram);
 
-void rethink_cd32fmv(void)
+static void rethink_cd32fmv(void)
 {
 	if (!fmv_ram_bank.baseaddr)
 		return;
@@ -392,7 +395,7 @@ static void l64111_setvolume(void)
 	write_log(_T("L64111 mute %d\n"), volume ? 0 : 1);
 	if (cda) {
 		if (audio_mode) {
-			audio_cda_volume(volume, volume);
+			audio_cda_volume(&cas, volume, volume);
 		} else {
 			cda->setvolume(volume, volume);
 		}
@@ -1276,7 +1279,7 @@ static void io_wput(uaecptr addr, uae_u16 v)
 
 static uae_u32 REGPARAM2 fmv_wget (uaecptr addr)
 {
-	uae_u32 v;
+	uae_u32 v = 0;
 	addr -= fmv_start & fmv_bank.mask;
 	addr &= fmv_bank.mask;
 	int mask = addr & BANK_MASK;
@@ -1307,7 +1310,7 @@ static uae_u32 REGPARAM2 fmv_lget (uaecptr addr)
 
 static uae_u32 REGPARAM2 fmv_bget (uaecptr addr)
 {
-	uae_u32 v;
+	uae_u32 v = 0;
 	addr -= fmv_start & fmv_bank.mask;
 	addr &= fmv_bank.mask;
 	int mask = addr & BANK_MASK;
@@ -1371,19 +1374,19 @@ void cd32_fmv_set_sync(double svpos, double adjust)
 	fmv_syncadjust = adjust;
 }
 
-void fmv_next_cd_audio_buffer_callback(int bufnum)
+static void fmv_next_cd_audio_buffer_callback(int bufnum, void *param)
 {
 	uae_sem_wait(&play_sem);
 	if (bufnum >= 0) {
 		fmv_bufon[bufnum] = 0;
 		bufnum = 1 - bufnum;
 		if (fmv_bufon[bufnum])
-			audio_cda_new_buffer((uae_s16*)cda->buffers[bufnum], PCM_SECTORS * KJMP2_SAMPLES_PER_FRAME, bufnum, fmv_next_cd_audio_buffer_callback);
+			audio_cda_new_buffer(&cas, (uae_s16*)cda->buffers[bufnum], PCM_SECTORS * KJMP2_SAMPLES_PER_FRAME, bufnum, fmv_next_cd_audio_buffer_callback, param);
 		else
 			bufnum = -1;
 	}
 	if (bufnum < 0) {
-		audio_cda_new_buffer(NULL, 0, -1, NULL);
+		audio_cda_new_buffer(&cas, NULL, 0, -1, NULL, NULL);
 	}
 	uae_sem_post(&play_sem);
 }
@@ -1400,6 +1403,20 @@ static void cd32_fmv_audio_handler(void)
 
 	if (!fmv_ram_bank.baseaddr)
 		return;
+
+	if (cd_audio_mode_changed || (cl450_play && !cda)) {
+		cd_audio_mode_changed = false;
+		if (cl450_play) {
+			if (audio_mode) {
+				audio_cda_new_buffer(&cas, NULL, -1, -1, NULL, NULL);
+			}
+			audio_mode = currprefs.sound_cdaudio;
+			fmv_bufon[0] = fmv_bufon[1] = 0;
+			delete cda;
+			cda = new cda_audio(PCM_SECTORS, KJMP2_SAMPLES_PER_FRAME * 4, 44100, audio_mode != 0);
+			l64111_setvolume();
+		}
+	}
 
 	if (cl450_buffer_offset == 0) {
 		if (cl450_buffer_empty_cnt >= 2)
@@ -1445,7 +1462,7 @@ static void cd32_fmv_audio_handler(void)
 	if (audio_mode) {
 		if (!play0 && !play1) {
 			fmv_bufon[bufnum] = 1;
-			fmv_next_cd_audio_buffer_callback(1 - bufnum);
+			fmv_next_cd_audio_buffer_callback(1 - bufnum, NULL);
 		}
 		fmv_bufon[bufnum] = 1;
 	} else {
@@ -1457,7 +1474,7 @@ static void cd32_fmv_audio_handler(void)
 	l64111_regs[A_CB_STATUS] -= PCM_SECTORS;
 }
 
-void cd32_fmv_hsync_handler(void)
+static void cd32_fmv_hsync_handler(void)
 {
 	if (!fmv_ram_bank.baseaddr)
 		return;
@@ -1508,14 +1525,14 @@ void cd32_fmv_hsync_handler(void)
 }
 
 
-void cd32_fmv_reset(void)
+static void cd32_fmv_reset(int hardreset)
 {
 	if (fmv_ram_bank.baseaddr)
-		memset(fmv_ram_bank.baseaddr, 0, fmv_ram_bank.allocated);
+		memset(fmv_ram_bank.baseaddr, 0, fmv_ram_bank.allocated_size);
 	cd32_fmv_state(0);
 }
 
-void cd32_fmv_free(void)
+static void cd32_fmv_free(void)
 {
 	mapped_free(&fmv_rom_bank);
 	mapped_free(&fmv_ram_bank);
@@ -1525,7 +1542,7 @@ void cd32_fmv_free(void)
 	videoram = NULL;
 	if (cda) {
 		if (audio_mode) {
-			fmv_next_cd_audio_buffer_callback(-1);
+			fmv_next_cd_audio_buffer_callback(-1, NULL);
 		} else {
 			cda->wait(0);
 			cda->wait(1);
@@ -1543,42 +1560,32 @@ void cd32_fmv_free(void)
 	l64111_reset();
 }
 
-addrbank *cd32_fmv_init (uaecptr start)
+addrbank *cd32_fmv_init (struct autoconfig_info *aci)
 {
-	struct zfile *z;
-
+	device_add_reset_imm(cd32_fmv_reset);
 	cd32_fmv_free();
-	write_log (_T("CD32 FMV mapped @$%x\n"), start);
-	if (start != fmv_start) {
-		write_log(_T("CD32 FMV invalid base address!\n"));
-		return &fmv_rom_bank;
+	write_log (_T("CD32 FMV mapped @$%x\n"), expamem_board_pointer);
+	if (expamem_board_pointer != fmv_start) {
+		write_log(_T("CD32 FMV unexpected base address!\n"));
 	}
-	z = read_rom_name(currprefs.cartfile);
-	if (!z) {
-		int ids[] = { 74, 23, -1 };
-		struct romdata *rd;
-		struct romlist *rl = getromlistbyids (ids, NULL);
-		if (rl) {
-			rd = rl->rd;
-			write_log (_T("CD32 FMV ROM %d.%d\n"), rd->ver, rd->rev);
-			z = read_rom (rd);
-		}
-	}
-	fmv_rom_bank.mask = fmv_rom_size - 1;
-	fmv_rom_bank.allocated = fmv_rom_size;
-	fmv_ram_bank.mask = fmv_ram_size - 1;
-	fmv_ram_bank.allocated = fmv_ram_size;
+	if (!validate_banks_z2(&fmv_bank, expamem_board_pointer >> 16, expamem_board_size >> 16))
+		return &expamem_null;
 
-	if (z) {
-		if (mapped_malloc(&fmv_rom_bank)) {
-			int size = zfile_size(z);
-			zfile_fread (fmv_rom_bank.baseaddr, size > fmv_rom_size ? fmv_rom_size : size, 1, z);
-		}
-		zfile_fclose (z);
+	fmv_rom_bank.start = expamem_board_pointer;
+	fmv_ram_bank.start = fmv_rom_bank.start + 0x80000;
+
+	fmv_rom_bank.mask = fmv_rom_size - 1;
+	fmv_rom_bank.reserved_size = fmv_rom_size;
+	fmv_ram_bank.mask = fmv_ram_size - 1;
+	fmv_ram_bank.reserved_size = fmv_ram_size;
+
+	if (mapped_malloc(&fmv_rom_bank)) {
+		load_rom_rc(aci->rc, ROMTYPE_CD32CART, 262144, 0, fmv_rom_bank.baseaddr, 262144, 0);
 	}
+
 	if (!fmv_rom_bank.baseaddr) {
 		write_log(_T("CD32 FMV without ROM is not supported.\n"));
-		return &fmv_rom_bank;
+		return &expamem_null;
 	}
 	if (!audioram)
 		audioram = xmalloc(uae_u8, 262144);
@@ -1587,22 +1594,23 @@ addrbank *cd32_fmv_init (uaecptr start)
 	mapped_malloc(&fmv_ram_bank);
 	if (!pcmaudio)
 		pcmaudio = xcalloc(struct fmv_pcmaudio, L64111_CHANNEL_BUFFERS);
-
 	kjmp2_init(&mp2);
-	if (!cda) {
-		cda = new cda_audio(PCM_SECTORS, KJMP2_SAMPLES_PER_FRAME * 4, 44100);
-		l64111_setvolume();
-	}
 	if (!mpeg_decoder) {
 		mpeg_decoder = mpeg2_init();
 		mpeg_info = mpeg2_info(mpeg_decoder);
 	}
-
+	memset(&cas, 0, sizeof(cas));
 	fmv_bank.mask = fmv_board_size - 1;
 	map_banks(&fmv_rom_bank, (fmv_start + ROM_BASE) >> 16, fmv_rom_size >> 16, 0);
 	map_banks(&fmv_ram_bank, (fmv_start + RAM_BASE) >> 16, fmv_ram_size >> 16, 0);
 	map_banks(&fmv_bank, (fmv_start + IO_BASE) >> 16, (RAM_BASE - IO_BASE) >> 16, 0);
 	uae_sem_init(&play_sem, 0, 1);
-	cd32_fmv_reset();
+	cd32_fmv_reset(1);
+
+	device_add_hsync(cd32_fmv_hsync_handler);
+	device_add_vsync_pre(cd32_fmv_vsync_handler);
+	device_add_exit(cd32_fmv_free);
+	device_add_rethink(rethink_cd32fmv);
+
 	return &fmv_rom_bank;
 }

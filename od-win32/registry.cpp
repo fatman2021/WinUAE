@@ -6,11 +6,14 @@
 #include <shlwapi.h>
 #include "win32.h"
 #include "registry.h"
-#include "crc32.h"
+#include "ini.h"
 
 static int inimode = 0;
 static TCHAR *inipath;
-#define PUPPA _T("eitätäoo")
+
+#define ROOT_TREE _T("WinUAE")
+
+static struct ini_data *inidata;
 
 static HKEY gr (UAEREG *root)
 {
@@ -21,7 +24,7 @@ static HKEY gr (UAEREG *root)
 static TCHAR *gs (UAEREG *root)
 {
 	if (!root)
-		return _T("WinUAE");
+		return ROOT_TREE;
 	return root->inipath;
 }
 static TCHAR *gsn (UAEREG *root, const TCHAR *name)
@@ -38,8 +41,7 @@ static TCHAR *gsn (UAEREG *root, const TCHAR *name)
 int regsetstr (UAEREG *root, const TCHAR *name, const TCHAR *str)
 {
 	if (inimode) {
-		DWORD ret;
-		ret = WritePrivateProfileString (gs (root), name, str, inipath);
+		int ret = ini_addstring(inidata, gs(root), name, str);
 		return ret;
 	} else {
 		HKEY rk = gr (root);
@@ -52,10 +54,10 @@ int regsetstr (UAEREG *root, const TCHAR *name, const TCHAR *str)
 int regsetint (UAEREG *root, const TCHAR *name, int val)
 {
 	if (inimode) {
-		DWORD ret;
+		int ret;
 		TCHAR tmp[100];
 		_stprintf (tmp, _T("%d"), val);
-		ret = WritePrivateProfileString (gs (root), name, tmp, inipath);
+		ret = ini_addstring(inidata, gs(root), name, tmp);
 		return ret;
 	} else {
 		DWORD v = val;
@@ -70,12 +72,12 @@ int regqueryint (UAEREG *root, const TCHAR *name, int *val)
 {
 	if (inimode) {
 		int ret = 0;
-		TCHAR tmp[100];
-		GetPrivateProfileString (gs (root), name, PUPPA, tmp, sizeof (tmp) / sizeof (TCHAR), inipath);
-		if (_tcscmp (tmp, PUPPA)) {
+		TCHAR *tmp = NULL;
+		if (ini_getstring(inidata, gs(root), name, &tmp)) {
 			*val = _tstol (tmp);
 			ret = 1;
 		}
+		xfree(tmp);
 		return ret;
 	} else {
 		DWORD dwType = REG_DWORD;
@@ -90,10 +92,10 @@ int regqueryint (UAEREG *root, const TCHAR *name, int *val)
 int regsetlonglong (UAEREG *root, const TCHAR *name, ULONGLONG val)
 {
 	if (inimode) {
-		DWORD ret;
+		int ret;
 		TCHAR tmp[100];
 		_stprintf (tmp, _T("%I64d"), val);
-		ret = WritePrivateProfileString (gs (root), name, tmp, inipath);
+		ret = ini_addstring(inidata, gs(root), name, tmp);
 		return ret;
 	} else {
 		ULONGLONG v = val;
@@ -106,14 +108,15 @@ int regsetlonglong (UAEREG *root, const TCHAR *name, ULONGLONG val)
 
 int regquerylonglong (UAEREG *root, const TCHAR *name, ULONGLONG *val)
 {
+	*val = 0;
 	if (inimode) {
 		int ret = 0;
-		TCHAR tmp[100];
-		GetPrivateProfileString (gs (root), name, PUPPA, tmp, sizeof (tmp) / sizeof (TCHAR), inipath);
-		if (_tcscmp (tmp, PUPPA)) {
+		TCHAR *tmp = NULL;
+		if (ini_getstring(inidata, gs(root), name, &tmp)) {
 			*val = _tstoi64 (tmp);
 			ret = 1;
 		}
+		xfree(tmp);
 		return ret;
 	} else {
 		DWORD dwType = REG_QWORD;
@@ -125,15 +128,16 @@ int regquerylonglong (UAEREG *root, const TCHAR *name, ULONGLONG *val)
 	}
 }
 
-
 int regquerystr (UAEREG *root, const TCHAR *name, TCHAR *str, int *size)
 {
 	if (inimode) {
 		int ret = 0;
-		TCHAR *tmp = xmalloc (TCHAR, (*size) + 1);
-		GetPrivateProfileString (gs (root), name, PUPPA, tmp, *size, inipath);
-		if (_tcscmp (tmp, PUPPA)) {
+		TCHAR *tmp = NULL;
+		if (ini_getstring(inidata, gs(root), name, &tmp)) {
+			if (_tcslen(tmp) >= *size)
+				tmp[(*size) - 1] = 0;
 			_tcscpy (str, tmp);
+			*size = _tcslen(str);
 			ret = 1;
 		}
 		xfree (tmp);
@@ -154,26 +158,21 @@ int regenumstr (UAEREG *root, int idx, TCHAR *name, int *nsize, TCHAR *str, int 
 	name[0] = 0;
 	str[0] = 0;
 	if (inimode) {
-		int ret = 0;
-		int tmpsize = 65536;
-		TCHAR *tmp = xmalloc (TCHAR, tmpsize);
-		if (GetPrivateProfileSection (gs (root), tmp, tmpsize, inipath) > 0) {
-			int i;
-			TCHAR *p = tmp, *p2;
-			for (i = 0; i < idx; i++) {
-				if (p[0] == 0)
-					break;
-				p += _tcslen (p) + 1;
+		TCHAR *name2 = NULL;
+		TCHAR *str2 = NULL;
+		int ret = ini_getsectionstring(inidata, gs(root), idx, &name2, &str2);
+		if (ret) {
+			if (_tcslen(name2) >= *nsize) {
+				name2[(*nsize) - 1] = 0;
 			}
-			if (p[0]) {
-				p2 = _tcschr (p, '=');
-				*p2++ = 0;
-				_tcscpy_s (name, *nsize, p);
-				_tcscpy_s (str, *size, p2);
-				ret = 1;
+			if (_tcslen(str2) >= *size) {
+				str2[(*size) - 1] = 0;
 			}
+			_tcscpy(name, name2);
+			_tcscpy(str, str2);
 		}
-		xfree (tmp);
+		xfree(str2);
+		xfree(name2);
 		return ret;
 	} else {
 		DWORD nsize2 = *nsize;
@@ -215,12 +214,11 @@ int regsetdata (UAEREG *root, const TCHAR *name, const void *str, int size)
 {
 	if (inimode) {
 		uae_u8 *in = (uae_u8*)str;
-		DWORD ret;
-		int i;
+		int ret;
 		TCHAR *tmp = xmalloc (TCHAR, size * 2 + 1);
-		for (i = 0; i < size; i++)
+		for (int i = 0; i < size; i++)
 			_stprintf (tmp + i * 2, _T("%02X"), in[i]); 
-		ret = WritePrivateProfileString (gs (root), name, tmp, inipath);
+		ret = ini_addstring(inidata, gs(root), name, tmp);
 		xfree (tmp);
 		return ret;
 	} else {
@@ -243,8 +241,8 @@ int regquerydata (UAEREG *root, const TCHAR *name, void *str, int *size)
 			goto err;
 		j = 0;
 		for (i = 0; i < _tcslen (tmp); i += 2) {
-			TCHAR c1 = toupper(tmp[i + 0]);
-			TCHAR c2 = toupper(tmp[i + 1]);
+			TCHAR c1 = _totupper(tmp[i + 0]);
+			TCHAR c2 = _totupper(tmp[i + 1]);
 			if (c1 >= 'A')
 				c1 -= 'A' - 10;
 			else if (c1 >= '0')
@@ -277,7 +275,7 @@ err:
 int regdelete (UAEREG *root, const TCHAR *name)
 {
 	if (inimode) {
-		WritePrivateProfileString (gs (root), name, NULL, inipath);
+		ini_delete(inidata, gs(root), name);
 		return 1;
 	} else {
 		HKEY rk = gr (root);
@@ -290,13 +288,9 @@ int regdelete (UAEREG *root, const TCHAR *name)
 int regexists (UAEREG *root, const TCHAR *name)
 {
 	if (inimode) {
-		int ret = 1;
-		TCHAR *tmp = xmalloc (TCHAR, _tcslen (PUPPA) + 1);
-		int size = _tcslen (PUPPA) + 1;
-		GetPrivateProfileString (gs (root), name, PUPPA, tmp, size, inipath);
-		if (!_tcscmp (tmp, PUPPA))
-			ret = 0;
-		xfree (tmp);
+		if (!inidata)
+			return 0;
+		int ret = ini_getstring(inidata, gs(root), name, NULL);
 		return ret;
 	} else {
 		HKEY rk = gr (root);
@@ -312,7 +306,7 @@ void regdeletetree (UAEREG *root, const TCHAR *name)
 		TCHAR *s = gsn (root, name);
 		if (!s)
 			return;
-		WritePrivateProfileSection (s, _T(""), inipath);
+		ini_delete(inidata, s, NULL);
 		xfree (s);
 	} else {
 		HKEY rk = gr (root);
@@ -326,23 +320,10 @@ int regexiststree (UAEREG *root, const TCHAR *name)
 {
 	if (inimode) {
 		int ret = 0;
-		int tmpsize = 65536;
-		TCHAR *p, *tmp;
 		TCHAR *s = gsn (root, name);
 		if (!s)
 			return 0;
-		tmp = xmalloc (TCHAR, tmpsize / sizeof (TCHAR));
-		tmp[0] = 0;
-		GetPrivateProfileSectionNames (tmp, tmpsize, inipath);
-		p = tmp;
-		while (p[0]) {
-			if (!_tcscmp (p, name)) {
-				ret = 1;
-				break;
-			}
-			p += _tcslen (p) + 1;
-		}
-		xfree (tmp);
+		ret = ini_getstring(inidata, s, NULL, NULL);
 		xfree (s);
 		return ret;
 	} else {
@@ -400,6 +381,8 @@ void regclosetree (UAEREG *key)
 {
 	if (!key)
 		return;
+	if (inimode)
+		ini_save(inidata, inipath);
 	if (key->fkey)
 		RegCloseKey (key->fkey);
 	xfree (key->inipath);
@@ -409,7 +392,7 @@ void regclosetree (UAEREG *key)
 int reginitializeinit (TCHAR **pppath)
 {
 	UAEREG *r = NULL;
-	TCHAR path[MAX_DPATH], fpath[MAX_PATH];
+	TCHAR path[MAX_DPATH], fpath[MAX_DPATH];
 	FILE *f;
 	TCHAR *ppath = *pppath;
 
@@ -418,7 +401,7 @@ int reginitializeinit (TCHAR **pppath)
 		int ok = 0;
 		TCHAR *posn;
 		path[0] = 0;
-		GetFullPathName (_wpgmptr, sizeof path / sizeof (TCHAR), path, NULL);
+		GetFullPathName (executable_path, sizeof path / sizeof (TCHAR), path, NULL);
 		if (_tcslen (path) > 4 && !_tcsicmp (path + _tcslen (path) - 4, _T(".exe"))) {
 			_tcscpy (path + _tcslen (path) - 3, _T("ini"));
 			if (GetFileAttributes (path) != INVALID_FILE_ATTRIBUTES)
@@ -426,7 +409,7 @@ int reginitializeinit (TCHAR **pppath)
 		}
 		if (!ok) {
 			path[0] = 0;
-			GetFullPathName (_wpgmptr, sizeof path / sizeof (TCHAR), path, NULL);
+			GetFullPathName (executable_path, sizeof path / sizeof (TCHAR), path, NULL);
 			if((posn = _tcsrchr (path, '\\')))
 				posn[1] = 0;
 			_tcscat (path, _T("winuae.ini"));
@@ -444,6 +427,7 @@ int reginitializeinit (TCHAR **pppath)
 
 	inimode = 1;
 	inipath = my_strdup (fpath);
+	inidata = ini_load(inipath, true);
 	if (!regexists (NULL, _T("Version")))
 		goto fail;
 	return 1;

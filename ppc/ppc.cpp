@@ -4,6 +4,7 @@
 
 #include "options.h"
 #include "threaddep/thread.h"
+#include "machdep/rpt.h"
 #include "memory.h"
 #include "cpuboard.h"
 #include "debug.h"
@@ -12,10 +13,10 @@
 #include "gui.h"
 #include "autoconf.h"
 #include "uae/dlopen.h"
-
+#include "uae/log.h"
 #include "uae/ppc.h"
-
 #include "uae/qemu.h"
+#include "devices.h"
 
 #define SPINLOCK_DEBUG 0
 #define PPC_ACCESS_LOG 0
@@ -31,30 +32,39 @@
 
 #define TRACE(format, ...) write_log(_T("PPC: ") format, ## __VA_ARGS__)
 
+#ifdef WINUAE
+#define WIN32_SPINLOCK
+#endif
+
 #if SPINLOCK_DEBUG
 static volatile int spinlock_cnt;
 #endif
 
 static volatile bool ppc_spinlock_waiting;
-#ifdef _WIN32
+
+#ifdef WIN32_SPINLOCK
 #define CRITICAL_SECTION_SPIN_COUNT 5000
 static CRITICAL_SECTION ppc_cs1, ppc_cs2;
 static bool ppc_cs_initialized;
 #else
 #include <glib.h>
-static GMutex mutex;
+static GMutex mutex, mutex2;
 #endif
 
 void uae_ppc_spinlock_get(void)
 {
-#ifdef _WIN32
+#ifdef WIN32_SPINLOCK
 	EnterCriticalSection(&ppc_cs2);
 	ppc_spinlock_waiting = true;
 	EnterCriticalSection(&ppc_cs1);
 	ppc_spinlock_waiting = false;
 	LeaveCriticalSection(&ppc_cs2);
 #else
+	g_mutex_lock(&mutex2);
+	ppc_spinlock_waiting = true;
 	g_mutex_lock(&mutex);
+	ppc_spinlock_waiting = false;
+	g_mutex_unlock(&mutex2);
 #endif
 #if SPINLOCK_DEBUG
 	if (spinlock_cnt != 0)
@@ -62,6 +72,7 @@ void uae_ppc_spinlock_get(void)
 	spinlock_cnt++;
 #endif
 }
+
 void uae_ppc_spinlock_release(void)
 {
 #if SPINLOCK_DEBUG
@@ -69,7 +80,7 @@ void uae_ppc_spinlock_release(void)
 		write_log(_T("uae_ppc_spinlock_release %d!\n"), spinlock_cnt);
 	spinlock_cnt--;
 #endif
-#ifdef _WIN32
+#ifdef WIN32_SPINLOCK
 	LeaveCriticalSection(&ppc_cs1);
 #else
 	g_mutex_unlock(&mutex);
@@ -78,22 +89,21 @@ void uae_ppc_spinlock_release(void)
 
 static void uae_ppc_spinlock_create(void)
 {
+#ifdef WIN32_SPINLOCK
 #if SPINLOCK_DEBUG
 	write_log(_T("uae_ppc_spinlock_create\n"));
 #endif
-#ifdef _WIN32
 	if (ppc_cs_initialized) {
 		DeleteCriticalSection(&ppc_cs1);
 		DeleteCriticalSection(&ppc_cs2);
 	}
 	InitializeCriticalSectionAndSpinCount(&ppc_cs1, CRITICAL_SECTION_SPIN_COUNT);
 	InitializeCriticalSectionAndSpinCount(&ppc_cs2, CRITICAL_SECTION_SPIN_COUNT);
-#else
-#endif
 #if SPINLOCK_DEBUG
 	spinlock_cnt = 0;
 #endif
 	ppc_cs_initialized = true;
+#endif
 }
 
 volatile int ppc_state;
@@ -126,6 +136,7 @@ static void PPCCALL dummy_ppc_cpu_run_single(int count) { }
 
 static void PPCCALL dummy_ppc_cpu_pause(int pause)
 {
+    UAE_LOG_STUB("pause=%d\n", pause);
 }
 
 /* Functions typedefs for PPC implementation */
@@ -378,10 +389,11 @@ static void initialize(void)
 
 static void map_banks(void)
 {
-	if (impl.map_memory == NULL)
+	if (impl.map_memory == NULL) {
 		return;
-/*
-	 * Use NULL to get callbacks to uae_ppc_io_mem_read/write. Use real
+	}
+	/*
+	 * Use NULL for memory to get callbacks for read/write. Use real
 	 * memory address for direct access to RAM banks (looks like this
 	 * is needed by JIT, or at least more work is needed on QEmu Side
 	 * to allow all memory access to go via callbacks).
@@ -393,11 +405,12 @@ static void map_banks(void)
 
 	for (int i = 0; i < map.num_regions; i++) {
 		UaeMemoryRegion *r = &map.regions[i];
-		regions[i].start = r->start;
-		regions[i].size = r->size;
-		regions[i].name = ua(r->name);
-		regions[i].alias = r->alias;
-		regions[i].memory = r->memory;
+		PPCMemoryRegion *pr = &regions[i];
+		pr->start = r->start;
+		pr->size = r->size;
+		pr->name = ua(r->name);
+		pr->alias = r->alias;
+		pr->memory = r->memory;
 	}
 
 	if (impl.in_cpu_thread && impl.in_cpu_thread() == false) {
@@ -409,7 +422,7 @@ static void map_banks(void)
 	}
 
 	for (int i = 0; i < map.num_regions; i++) {
-		free((void*)regions[i].name);
+		free(regions[i].name);
 	}
 }
 
@@ -432,7 +445,7 @@ static void set_and_wait_for_state(int state, int unlock)
 		}
 		impl.set_state(state);
 		if (impl.in_cpu_thread() == false) {
- 			uae_ppc_spinlock_get();
+			uae_ppc_spinlock_get();
 		}
 	}
 }
@@ -444,10 +457,32 @@ bool uae_self_is_ppc(void)
 	return impl.in_cpu_thread();
 }
 
-void ppc_map_banks(uae_u32 start, uae_u32 size, const TCHAR *name, void *addr, bool remove)
+void uae_ppc_wakeup_main(void)
+{
+	if (uae_self_is_ppc()) {
+		sleep_cpu_wakeup();
+	}
+}
+
+static void ppc_map_region(PPCMemoryRegion *r, bool dolock)
+{
+	if (dolock && impl.in_cpu_thread() == false) {
+		/* map_memory will acquire the qemu global lock, so we must ensure
+		* the PPC CPU can finish any I/O requests and release the lock. */
+		uae_ppc_spinlock_release();
+	}
+	impl.map_memory(r, -1);
+	if (dolock && impl.in_cpu_thread() == false) {
+		uae_ppc_spinlock_get();
+	}
+	free((void*)r->name);
+}
+
+static void ppc_map_banks2(uae_u32 start, uae_u32 size, const TCHAR *name, void *addr, bool remove, bool direct, bool dolock)
 {
 	if (ppc_state == PPC_STATE_INACTIVE || !impl.map_memory)
 		return;
+
 	PPCMemoryRegion r;
 	r.start = start;
 	r.size = size;
@@ -455,16 +490,49 @@ void ppc_map_banks(uae_u32 start, uae_u32 size, const TCHAR *name, void *addr, b
 	r.alias = remove ? 0xffffffff : 0;
 	r.memory = addr;
 
+	if (r.start == rtarea_base && rtarea_base && direct) {
+		// Map first half directly, it contains code only.
+		// Second half has dynamic data, it must not be direct mapped.
+		r.memory = rtarea_bank.baseaddr;
+		r.size = RTAREA_DATAREGION;
+		ppc_map_region(&r, dolock);
+		r.start = start + RTAREA_DATAREGION;
+		r.size = size - RTAREA_DATAREGION;
+		r.name = ua(name);
+		r.alias = remove ? 0xffffffff : 0;
+		r.memory = NULL;
+	} else if (r.start == uaeboard_base && uaeboard_base && direct) {
+		// Opposite here, first half indirect, second half direct.
+		r.memory = NULL;
+		r.size = UAEBOARD_DATAREGION_START;
+		ppc_map_region(&r, dolock);
+		r.start = start + UAEBOARD_DATAREGION_START;
+		r.size = UAEBOARD_DATAREGION_SIZE;
+		r.name = ua(name);
+		r.alias = remove ? 0xffffffff : 0;
+		r.memory = uaeboard_bank.baseaddr + UAEBOARD_DATAREGION_START;
+	}
+	ppc_map_region(&r, dolock);
+}
+void ppc_map_banks(uae_u32 start, uae_u32 size, const TCHAR *name, void *addr, bool remove)
+{
+	ppc_map_banks2(start, size, name, addr, remove, true, true);
+}
+
+void ppc_remap_bank(uae_u32 start, uae_u32 size, const TCHAR *name, void *addr)
+{
+	if (ppc_state == PPC_STATE_INACTIVE || !impl.map_memory)
+		return;
+
 	if (impl.in_cpu_thread() == false) {
-		/* map_memory will acquire the qemu global lock, so we must ensure
-		 * the PPC CPU can finish any I/O requests and release the lock. */
 		uae_ppc_spinlock_release();
 	}
-	impl.map_memory(&r, -1);
+	ppc_map_banks2(start, size, name, addr, true, false, false);
+	ppc_map_banks2(start, size, name, addr, false, true, false);
 	if (impl.in_cpu_thread() == false) {
 		uae_ppc_spinlock_get();
 	}
-	free((void*)r.name);
+
 }
 
 void uae_ppc_get_model(const TCHAR **model, uint32_t *hid1)
@@ -507,17 +575,17 @@ static void cpu_init(void)
 		impl.init_pvr(pvr);
 		return;
 	}
+
 	/* QEMU: CPU has already been initialized by qemu_uae_init */
 }
 
 static void uae_ppc_cpu_reset(void)
 {
-	static bool ppc_cpu_init_done;
-	
 	TRACE(_T("uae_ppc_cpu_reset\n"));
-	
+
 	initialize();
 
+	static bool ppc_cpu_init_done;
 	if (!ppc_cpu_init_done) {
 		write_log(_T("PPC: Hard reset\n"));
 		cpu_init();
@@ -591,6 +659,7 @@ STATIC_INLINE bool spinlock_pre(uaecptr addr)
 {
 	addrbank *ab = &get_mem_bank(addr);
 	if ((ab->flags & ABFLAG_THREADSAFE) == 0) {
+		sleep_cpu_wakeup();
 		uae_ppc_spinlock_get();
 		return true;
 	}
@@ -629,6 +698,21 @@ bool UAECALL uae_ppc_io_mem_write(uint32_t addr, uint32_t data, int size)
 		put_byte(addr, data);
 		break;
 	}
+
+	if (addr >= 0xdff000 && addr < 0xe00000) {
+		int reg = addr & 0x1fe;
+		switch (reg) {
+			case 0x09c: // INTREQ
+			case 0x09a: // INTENA
+			if (data & 0x8000) {
+				// possible interrupt change:
+				// make sure M68K thread reacts to it ASAP.
+				atomic_or(&uae_int_requested, 0x010000);
+			}
+			break;
+		}
+	}
+
 	spinlock_post(locked);
 
 #if PPC_ACCESS_LOG >= 2
@@ -646,12 +730,13 @@ bool UAECALL uae_ppc_io_mem_read(uint32_t addr, uint32_t *data, int size)
 	while (ppc_thread_running && ppc_cpu_lock_state < 0 && ppc_state);
 
 	if (addr >= 0xdff000 && addr < 0xe00000) {
+		int reg = addr & 0x1fe;
 		// shortcuts for common registers
-		if (addr == 0xdff01c) { // INTENAR
+		switch (reg) {
+			case 0x01c: // INTENAR
 			*data = intena;
 			return true;
-		}
-		if (addr == 0xdff01e) { // INTREQR
+			case 0x01e: // INTREQR
 			*data = intreq;
 			return true;
 		}
@@ -680,7 +765,8 @@ bool UAECALL uae_ppc_io_mem_read(uint32_t addr, uint32_t *data, int size)
 	}
 #endif
 #if PPC_ACCESS_LOG >= 2
-	write_log(_T("PPC read %08x=%08x %d\n"), addr, v, size);
+	if (addr < 0xb00000 || addr > 0xc00000)
+		write_log(_T("PPC read %08x=%08x %d\n"), addr, v, size);
 #endif
 	return true;
 }
@@ -723,6 +809,21 @@ bool UAECALL uae_ppc_io_mem_read64(uint32_t addr, uint64_t *data)
 	return true;
 }
 
+static void uae_ppc_hsync_handler(void)
+{
+	if (ppc_state == PPC_STATE_INACTIVE)
+		return;
+	if (using_pearpc()) {
+		if (ppc_state != PPC_STATE_SLEEP)
+			return;
+		if (impl.get_dec() == 0) {
+			uae_ppc_wakeup();
+		} else {
+			impl.do_dec(ppc_cycle_count);
+		}
+	}
+}
+
 void uae_ppc_cpu_stop(void)
 {
 	if (ppc_state == PPC_STATE_INACTIVE)
@@ -752,6 +853,8 @@ void uae_ppc_cpu_reboot(void)
 	TRACE(_T("uae_ppc_cpu_reboot\n"));
 
 	initialize();
+
+	device_add_hsync(uae_ppc_hsync_handler);
 
 	if (!ppc_thread_running) {
 		write_log(_T("Starting PPC thread.\n"));
@@ -819,14 +922,12 @@ bool uae_ppc_cpu_unlock(void)
 
 void uae_ppc_wakeup(void)
 {
-	//TRACE(_T("uae_ppc_wakeup\n"));
 	if (ppc_state == PPC_STATE_SLEEP)
 		ppc_state = PPC_STATE_ACTIVE;
 }
 
 void uae_ppc_interrupt(bool active)
 {
-	//TRACE(_T("uae_ppc_interrupt\n"));
 	if (using_pearpc()) {
 		if (active) {
 			impl.atomic_raise_ext_exception();
@@ -835,7 +936,7 @@ void uae_ppc_interrupt(bool active)
 			impl.atomic_cancel_ext_exception();
 		}
 		return;
- 	}
+	}
 
 	PPCLockStatus status = get_ppc_lock(PPC_KEEP_SPINLOCK);
 	impl.external_interrupt(active);
@@ -863,21 +964,6 @@ void uae_ppc_crash(void)
 	}
 }
 
-void uae_ppc_hsync_handler(void)
-{
-	if (ppc_state == PPC_STATE_INACTIVE)
-		return;
-	if (using_pearpc()) {
-		if (ppc_state != PPC_STATE_SLEEP)
-			return;
-		if (impl.get_dec() == 0) {
-			uae_ppc_wakeup();
-		} else {
-			impl.do_dec(ppc_cycle_count);
-		}
-	}
-}
-
 void uae_ppc_pause(int pause)
 {
 	if (ppc_state == PPC_STATE_INACTIVE)
@@ -893,6 +979,6 @@ void uae_ppc_pause(int pause)
 #if 0
 	else if (impl.pause) {
 		impl.pause(pause);
- 	}
+	}
 #endif
 }

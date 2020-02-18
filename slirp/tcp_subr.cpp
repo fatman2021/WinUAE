@@ -44,10 +44,10 @@
 
 /* patchable/settable parameters for tcp */
 int 	tcp_mssdflt = TCP_MSS;
-int 	tcp_rttdflt = TCPTV_SRTTDFLT / PR_SLOWHZ;
-int	tcp_do_rfc1323 = 0;	/* Don't do rfc1323 performance enhancements */
-int	tcp_rcvspace;	/* You may want to change this */
-int	tcp_sndspace;	/* Keep small if you have an error prone link */
+int		tcp_rttdflt = TCPTV_SRTTDFLT / PR_SLOWHZ;
+int		tcp_do_rfc1323 = 0;	/* Don't do rfc1323 performance enhancements */
+size_t	tcp_rcvspace;	/* You may want to change this */
+size_t	tcp_sndspace;	/* Keep small if you have an error prone link */
 
 /*
  * Tcp initialization
@@ -124,9 +124,9 @@ void tcp_respond(struct tcpcb *tp, struct tcpiphdr *ti, struct mbuf *m, tcp_seq 
 	int win = 0;
 
 	DEBUG_CALL("tcp_respond");
-	DEBUG_ARG("tp = %lx", (long)tp);
-	DEBUG_ARG("ti = %lx", (long)ti);
-	DEBUG_ARG("m = %lx", (long)m);
+	DEBUG_ARG("tp = %p", tp);
+	DEBUG_ARG("ti = %p", ti);
+	DEBUG_ARG("m = %p", m);
 	DEBUG_ARG("ack = %u", ack);
 	DEBUG_ARG("seq = %u", seq);
 	DEBUG_ARG("flags = %x", flags);
@@ -243,7 +243,7 @@ struct tcpcb *tcp_drop(struct tcpcb *tp, int err)
 */
 
 	DEBUG_CALL("tcp_drop");
-	DEBUG_ARG("tp = %lx", (long)tp);
+	DEBUG_ARG("tp = %p", tp);
 	DEBUG_ARG("errno = %d", errno);
 	
 	if (TCPS_HAVERCVDSYN(tp->t_state)) {
@@ -272,7 +272,7 @@ struct tcpcb *tcp_close(struct tcpcb *tp)
 	struct mbuf *m;
 
 	DEBUG_CALL("tcp_close");
-	DEBUG_ARG("tp = %lx", (long )tp);
+	DEBUG_ARG("tp = %p", tp);
 	
 	/* free the reassembly queue, if any */
 	t = tcpfrag_list_first(tp);
@@ -314,10 +314,7 @@ tcp_drain()
 
 #ifdef notdef
 
-void
-tcp_quench(i, errno)
-
-	int errno;
+void tcp_quench(int i, int errno)
 {
 	struct tcpcb *tp = intotcpcb(inp);
 
@@ -345,7 +342,7 @@ void tcp_sockclosed(struct tcpcb *tp)
 {
 
 	DEBUG_CALL("tcp_sockclosed");
-	DEBUG_ARG("tp = %lx", (long)tp);
+	DEBUG_ARG("tp = %p", tp);
 	
 	switch (tp->t_state) {
 
@@ -382,16 +379,16 @@ void tcp_sockclosed(struct tcpcb *tp)
  * nonblocking.  Connect returns after the SYN is sent, and does 
  * not wait for ACK+SYN.
  */
-SOCKET tcp_fconnect(struct socket *so)
+int tcp_fconnect(struct socket *so)
 {
-  SOCKET ret=0;
+  int ret=0;
   
   DEBUG_CALL("tcp_fconnect");
-  DEBUG_ARG("so = %lx", (long )so);
+  DEBUG_ARG("so = %p", so);
 
-  if( (ret=so->s=socket(AF_INET,SOCK_STREAM,0)) >= 0) {
+  if( (so->s=socket(AF_INET,SOCK_STREAM,0)) >= 0) {
 	int opt;
-	SOCKET s = so->s;
+	SLIRP_SOCKET s = so->s;
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(struct sockaddr_in));
 
@@ -417,8 +414,10 @@ SOCKET tcp_fconnect(struct socket *so)
       addr.sin_addr = so->so_faddr;
     addr.sin_port = so->so_fport;
     
+	char addrstr[INET_ADDRSTRLEN];
     DEBUG_MISC((" connect()ing, addr.sin_port=%d, addr.sin_addr.s_addr=%.16s\n", 
-		ntohs(addr.sin_port), inet_ntoa(addr.sin_addr)));
+		ntohs(addr.sin_port), inet_ntop(AF_INET, &addr.sin_addr,
+			addrstr, sizeof(addrstr))));
     /* We don't care what port we get */
     ret = connect(s,(struct sockaddr *)&addr,sizeof (addr));
     /*
@@ -449,11 +448,11 @@ void tcp_connect(struct socket *inso)
 	struct sockaddr_in addr;
 	socklen_t addrlen = sizeof(struct sockaddr_in);
 	struct tcpcb *tp;
-	SOCKET s;
+	SLIRP_SOCKET s;
 	int opt;
 
 	DEBUG_CALL("tcp_connect");
-	DEBUG_ARG("inso = %lx", (long)inso);
+	DEBUG_ARG("inso = %p", inso);
 	
 	/*
 	 * If it's an SS_ACCEPTONCE socket, no need to socreate()
@@ -476,7 +475,7 @@ void tcp_connect(struct socket *inso)
 		so->so_lport = inso->so_lport;
 	}
 	
-	(void) tcp_mss(sototcpcb(so), 0);
+	(void)tcp_mss(sototcpcb(so), 0);
 
 	if ((s = accept(inso->s,(struct sockaddr *)&addr,&addrlen)) < 0) {
 		tcp_close(sototcpcb(so)); /* This will sofree() as well */
@@ -624,8 +623,8 @@ int tcp_emu(struct socket *so, struct mbuf *m)
 	char *bptr;
 	
 	DEBUG_CALL("tcp_emu");
-	DEBUG_ARG("so = %lx", (long)so);
-	DEBUG_ARG("m = %lx", (long)m);
+	DEBUG_ARG("so = %p", so);
+	DEBUG_ARG("m = %p", m);
 	
 	switch(so->so_emu) {
 		int x, i;
@@ -816,7 +815,7 @@ int tcp_emu(struct socket *so, struct mbuf *m)
 				ns->so_laddr=so->so_laddr;
 				ns->so_lport=htons(port);
 
-				(void) tcp_mss(sototcpcb(ns), 0);
+				(void)tcp_mss(sototcpcb(ns), 0);
 
 				ns->so_faddr=so->so_faddr;
 				ns->so_fport=htons(IPPORT_RESERVED-1); /* Use a fake port. */
@@ -1043,7 +1042,7 @@ do_prompt:
 		 * of the connection as a NUL-terminated decimal ASCII string.
 		 */
 		so->so_emu = 0;
-		for (lport = 0, i = 0; i < m->m_len-1; ++i) {
+		for (lport = 0, i = 0; i < (int)(m->m_len - 1); ++i) {
 			if (m->m_data[i] < '0' || m->m_data[i] > '9')
 				return 1;       /* invalid number */
 			lport *= 10;
@@ -1237,7 +1236,7 @@ int tcp_ctl(struct socket *so)
         //	struct socket *tmpso;
 	
 	DEBUG_CALL("tcp_ctl");
-	DEBUG_ARG("so = %lx", (long )so);
+	DEBUG_ARG("so = %p", so);
 	
 #if 0
 	/*

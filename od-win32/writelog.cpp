@@ -69,7 +69,7 @@ static int debugger_type = -1;
 extern BOOL debuggerinitializing;
 extern int lof_store;
 static int console_input_linemode = -1;
-int always_flush_log = 1;
+int always_flush_log = 0;
 
 #define WRITE_LOG_BUF_SIZE 4096
 
@@ -90,6 +90,14 @@ static void set_console_input_mode(int line)
 	console_input_linemode = line;
 }
 
+static BOOL WINAPI ctrlchandler(DWORD ct)
+{
+	if (ct == CTRL_C_EVENT || ct == CTRL_CLOSE_EVENT) {
+		systray(hHiddenWnd, TRUE);
+	}
+	return FALSE;
+}
+
 static void getconsole (void)
 {
 	CONSOLE_SCREEN_BUFFER_INFO csbi;
@@ -105,6 +113,16 @@ static void getconsole (void)
 			csbi.dwMaximumWindowSize.Y = 5000;
 			SetConsoleScreenBufferSize (stdoutput, csbi.dwMaximumWindowSize);
 		}
+	}
+	SetConsoleCtrlHandler(ctrlchandler, TRUE);
+}
+
+static void flushmsgpump(void)
+{
+	MSG msg;
+	while (PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) {
+		TranslateMessage(&msg);
+		DispatchMessage(&msg);
 	}
 }
 
@@ -141,7 +159,7 @@ static void openconsole (void)
 		if (debugger_type < 0) {
 			regqueryint (NULL, _T("DebuggerType"), &debugger_type);
 			if (debugger_type <= 0)
-				debugger_type = 2;
+				debugger_type = 1;
 			openconsole();
 			return;
 		}
@@ -333,15 +351,44 @@ static void console_put (const TCHAR *buffer)
 	}
 }
 
+static int console_buf_len = 100000;
+
 void console_out_f (const TCHAR *format,...)
 {
+	int len;
 	va_list parms;
+	TCHAR *pbuf;
 	TCHAR buffer[WRITE_LOG_BUF_SIZE];
+	TCHAR *bigbuf = NULL;
 
+	pbuf = buffer;
 	va_start (parms, format);
-	_vsntprintf (buffer, WRITE_LOG_BUF_SIZE - 1, format, parms);
+	len = _vsntprintf (pbuf, WRITE_LOG_BUF_SIZE - 1, format, parms);
+	if (!len)
+		return;
+	if (len < 0 || len >= WRITE_LOG_BUF_SIZE - 2) {
+		int buflen = console_buf_len;
+		for (;;) {
+			bigbuf = xmalloc(TCHAR, buflen);
+			if (!bigbuf)
+				return;
+			len = _vsntprintf(bigbuf, buflen - 1, format, parms);
+			if (!len)
+				return;
+			if (len > 0 && len < buflen - 2)
+				break;
+			xfree(bigbuf);
+			buflen += 100000;
+			if (buflen > 10000000)
+				return;
+		}
+		pbuf = bigbuf;
+		console_buf_len = buflen;
+	}
 	va_end (parms);
-	console_put (buffer);
+	console_put (pbuf);
+	if (bigbuf)
+		xfree(bigbuf);
 }
 void console_out (const TCHAR *txt)
 {
@@ -350,6 +397,7 @@ void console_out (const TCHAR *txt)
 
 bool console_isch (void)
 {
+	flushmsgpump();
 	if (console_buffer) {
 		return 0;
 	} else if (realconsole) {
@@ -364,6 +412,7 @@ bool console_isch (void)
 
 TCHAR console_getch (void)
 {
+	flushmsgpump();
 	if (console_buffer) {
 		return 0;
 	} else if (realconsole) {
@@ -386,6 +435,7 @@ int console_get (TCHAR *out, int maxlen)
 {
 	*out = 0;
 
+	flushmsgpump();
 	set_console_input_mode(1);
 	if (consoleopen > 0) {
 		return console_get_gui (out, maxlen);
@@ -431,7 +481,7 @@ void console_flush (void)
 
 static int lfdetected = 1;
 
-static TCHAR *writets (void)
+TCHAR *write_log_get_ts(void)
 {
 	struct tm *t;
 	struct _timeb tb;
@@ -443,6 +493,8 @@ static TCHAR *writets (void)
 	if (bootlogmode)
 		return NULL;
 	if (nodatestamps)
+		return NULL;
+	if (!vsync_counter)
 		return NULL;
 	_ftime (&tb);
 	t = localtime (&tb.time);
@@ -527,6 +579,47 @@ void write_log (const char *format, ...)
 	va_end (parms);
 }
 
+void write_logx(const TCHAR *format, ...)
+{
+	int count;
+	TCHAR buffer[WRITE_LOG_BUF_SIZE];
+	int bufsize = WRITE_LOG_BUF_SIZE;
+	TCHAR *bufp;
+	va_list parms;
+
+	if (!cs_init)
+		return;
+
+	EnterCriticalSection (&cs);
+	va_start (parms, format);
+	bufp = buffer;
+	for (;;) {
+		count = _vsntprintf (bufp, bufsize - 1, format, parms);
+		if (count < 0) {
+			bufsize *= 10;
+			if (bufp != buffer)
+				xfree (bufp);
+			bufp = xmalloc (TCHAR, bufsize);
+			continue;
+		}
+		break;
+	}
+	bufp[bufsize - 1] = 0;
+	if (1) {
+		writeconsole (bufp);
+	}
+	if (debugfile) {
+		_ftprintf (debugfile, _T("%s"), bufp);
+	}
+	lfdetected = 0;
+	if (_tcslen (bufp) > 0 && bufp[_tcslen (bufp) - 1] == '\n')
+		lfdetected = 1;
+	va_end (parms);
+	if (bufp != buffer)
+		xfree (bufp);
+	LeaveCriticalSection (&cs);
+}
+
 void write_log (const TCHAR *format, ...)
 {
 	int count;
@@ -534,6 +627,9 @@ void write_log (const TCHAR *format, ...)
 	int bufsize = WRITE_LOG_BUF_SIZE;
 	TCHAR *bufp;
 	va_list parms;
+
+	if (!SHOW_CONSOLE && !console_logging && !debugfile)
+		return;
 
 	if (!cs_init)
 		return;
@@ -560,7 +656,7 @@ void write_log (const TCHAR *format, ...)
 	bufp[bufsize - 1] = 0;
 	if (!_tcsncmp (bufp, _T("write "), 6))
 		bufsize--;
-	ts = writets ();
+	ts = write_log_get_ts();
 	if (bufp[0] == '*')
 		count++;
 	if (SHOW_CONSOLE || console_logging) {
@@ -573,6 +669,17 @@ void write_log (const TCHAR *format, ...)
 			_ftprintf (debugfile, _T("%s"), ts);
 		_ftprintf (debugfile, _T("%s"), bufp);
 	}
+
+#if 0
+	static int is_debugger_present = -1;
+	if (is_debugger_present == -1) {
+		is_debugger_present = IsDebuggerPresent();
+	}
+	if (is_debugger_present) {
+		OutputDebugString(bufp);
+	}
+#endif
+
 	lfdetected = 0;
 	if (_tcslen (bufp) > 0 && bufp[_tcslen (bufp) - 1] == '\n')
 		lfdetected = 1;
@@ -679,4 +786,18 @@ void jit_abort (const TCHAR *format,...)
 		gui_message (_T("JIT: Serious error:\n%s"), buffer);
 	happened = 1;
 	uae_reset (1, 0);
+}
+
+void jit_abort(const char *format, ...)
+{
+	char buffer[WRITE_LOG_BUF_SIZE];
+	va_list parms;
+	TCHAR *b;
+
+	va_start(parms, format);
+	vsprintf(buffer, format, parms);
+	b = au(buffer);
+	jit_abort(_T("%s"), b);
+	xfree(b);
+	va_end(parms);
 }

@@ -6,10 +6,15 @@
   * (c) 2006 Toni Wilen
   */
 
-uaecptr uaeserialdev_startup (uaecptr resaddr);
-void uaeserialdev_install (void);
-void uaeserialdev_reset (void);
-void uaeserialdev_start_threads (void);
+#ifndef UAE_UAESERIAL_H
+#define UAE_UAESERIAL_H
+
+#include "uae/types.h"
+
+uaecptr uaeserialdev_startup(TrapContext*, uaecptr resaddr);
+void uaeserialdev_install(void);
+void uaeserialdev_reset(void);
+void uaeserialdev_start_threads(void);
 
 extern int log_uaeserial;
 
@@ -20,3 +25,5 @@ struct uaeserialdata
     void *writeevent;
 #endif
 };
+
+#endif /* UAE_UAESERIAL_H */

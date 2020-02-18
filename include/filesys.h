@@ -6,8 +6,11 @@
   * Copyright 1997 Bernd Schmidt
   */
 
-#ifndef FILESYS_H
-#define FILESYS_H
+#ifndef UAE_FILESYS_H
+#define UAE_FILESYS_H
+
+#include "uae/types.h"
+#include "traps.h"
 
 struct hardfilehandle;
 
@@ -66,12 +69,16 @@ struct hardfiledata {
 
 	struct hdf_cache bcache[MAX_HDF_CACHE_BLOCKS];
 	uae_u8 scsi_sense[MAX_SCSI_SENSE];
+	uae_u8 sector_buffer[512];
+	uae_u8 identity[512];
 
 	struct uaedev_config_info delayedci;
 	int reinsertdelay;
 	bool isreinsert;
 	bool unit_stopped;
-	int unit_attention;
+
+	struct ini_data *geometry;
+	int specialaccessmode;
 };
 
 #define HFD_FLAGS_REALDRIVE 1
@@ -89,26 +96,22 @@ struct hd_hardfiledata {
     int ansi_version;
 };
 
-#define HD_CONTROLLER_EXPANSION_MAX 50
-#define HD_CONTROLLER_NEXT_UNIT 100
+#define HD_CONTROLLER_EXPANSION_MAX 190
+#define HD_CONTROLLER_NEXT_UNIT 600
 
 #define HD_CONTROLLER_TYPE_UAE 0
 #define HD_CONTROLLER_TYPE_IDE_AUTO (HD_CONTROLLER_TYPE_UAE + 1)
 #define HD_CONTROLLER_TYPE_IDE_FIRST (HD_CONTROLLER_TYPE_IDE_AUTO)
-#define HD_CONTROLLER_TYPE_IDE_MB (HD_CONTROLLER_TYPE_IDE_FIRST + 1)
-#define HD_CONTROLLER_TYPE_IDE_EXPANSION_FIRST (HD_CONTROLLER_TYPE_IDE_MB + 1)
+#define HD_CONTROLLER_TYPE_IDE_EXPANSION_FIRST (HD_CONTROLLER_TYPE_IDE_FIRST + 1)
 #define HD_CONTROLLER_TYPE_IDE_LAST (HD_CONTROLLER_TYPE_IDE_EXPANSION_FIRST + HD_CONTROLLER_EXPANSION_MAX - 1)
 
 #define HD_CONTROLLER_TYPE_SCSI_AUTO (HD_CONTROLLER_TYPE_IDE_LAST + 1)
 #define HD_CONTROLLER_TYPE_SCSI_FIRST (HD_CONTROLLER_TYPE_SCSI_AUTO)
-#define HD_CONTROLLER_TYPE_SCSI_A3000 (HD_CONTROLLER_TYPE_SCSI_FIRST + 1)
-#define HD_CONTROLLER_TYPE_SCSI_A4000T (HD_CONTROLLER_TYPE_SCSI_A3000 + 1)
-#define HD_CONTROLLER_TYPE_SCSI_CDTV (HD_CONTROLLER_TYPE_SCSI_A4000T + 1)
-#define HD_CONTROLLER_TYPE_SCSI_EXPANSION_FIRST (HD_CONTROLLER_TYPE_SCSI_CDTV + 1)
+#define HD_CONTROLLER_TYPE_SCSI_EXPANSION_FIRST (HD_CONTROLLER_TYPE_SCSI_FIRST + 1)
 #define HD_CONTROLLER_TYPE_SCSI_LAST (HD_CONTROLLER_TYPE_SCSI_EXPANSION_FIRST + HD_CONTROLLER_EXPANSION_MAX - 1)
 
-#define HD_CONTROLLER_TYPE_PCMCIA_SRAM (HD_CONTROLLER_TYPE_SCSI_LAST + 1)
-#define HD_CONTROLLER_TYPE_PCMCIA_IDE (HD_CONTROLLER_TYPE_PCMCIA_SRAM + 1)
+#define HD_CONTROLLER_TYPE_CUSTOM_FIRST (HD_CONTROLLER_TYPE_SCSI_LAST + 1)
+#define HD_CONTROLLER_TYPE_CUSTOM_LAST (HD_CONTROLLER_TYPE_CUSTOM_FIRST + HD_CONTROLLER_EXPANSION_MAX - 1)
 
 #define FILESYS_VIRTUAL 0
 #define FILESYS_HARDFILE 1
@@ -117,28 +120,27 @@ struct hd_hardfiledata {
 #define FILESYS_CD 4
 #define FILESYS_TAPE 5
 
-#define MAX_FILESYSTEM_UNITS 30
+#define MAX_FILESYSTEM_UNITS 50
 
 struct uaedev_mount_info;
 extern struct uaedev_mount_info options_mountinfo;
 
-extern struct hardfiledata *get_hardfile_data (int nr);
-#define FILESYS_MAX_BLOCKSIZE 2048
+extern struct hardfiledata *get_hardfile_data(int nr);
+extern struct hardfiledata *get_hardfile_data_controller(int nr);
+#define FILESYS_MAX_BLOCKSIZE 8192
 extern int hdf_open (struct hardfiledata *hfd);
 extern int hdf_open (struct hardfiledata *hfd, const TCHAR *altname);
 extern int hdf_dup (struct hardfiledata *dhfd, const struct hardfiledata *shfd);
 extern void hdf_close (struct hardfiledata *hfd);
 extern int hdf_read_rdb (struct hardfiledata *hfd, void *buffer, uae_u64 offset, int len);
-extern int hdf_read (struct hardfiledata *hfd, void *buffer, uae_u64 offset, int len);
-extern int hdf_write (struct hardfiledata *hfd, void *buffer, uae_u64 offset, int len);
+extern int hdf_read(struct hardfiledata *hfd, void *buffer, uae_u64 offset, int len);
+extern int hdf_write(struct hardfiledata *hfd, void *buffer, uae_u64 offset, int len);
 extern int hdf_getnumharddrives (void);
-extern TCHAR *hdf_getnameharddrive (int index, int flags, int *sectorsize, int *dangerousdrive);
-extern int isspecialdrive(const TCHAR *name);
-extern int get_native_path(uae_u32 lock, TCHAR *out);
+extern TCHAR *hdf_getnameharddrive (int index, int flags, int *sectorsize, int *dangerousdrive, uae_u32 *outflags);
+extern int get_native_path(TrapContext *ctx, uae_u32 lock, TCHAR *out);
 extern void hardfile_do_disk_change (struct uaedev_config_data *uci, bool insert);
 extern void hardfile_send_disk_change (struct hardfiledata *hfd, bool insert);
 extern int hardfile_media_change (struct hardfiledata *hfd, struct uaedev_config_info *ci, bool inserted, bool timer);
-extern int hardfile_added (struct uaedev_config_info *ci);
 
 void hdf_hd_close(struct hd_hardfiledata *hfd);
 int hdf_hd_open(struct hd_hardfiledata *hfd);
@@ -153,8 +155,12 @@ extern void hdf_close_target (struct hardfiledata *hfd);
 extern int hdf_read_target (struct hardfiledata *hfd, void *buffer, uae_u64 offset, int len);
 extern int hdf_write_target (struct hardfiledata *hfd, void *buffer, uae_u64 offset, int len);
 extern int hdf_resize_target (struct hardfiledata *hfd, uae_u64 newsize);
+
 extern void getchsgeometry (uae_u64 size, int *pcyl, int *phead, int *psectorspertrack);
 extern void getchsgeometry_hdf (struct hardfiledata *hfd, uae_u64 size, int *pcyl, int *phead, int *psectorspertrack);
 extern void getchspgeometry (uae_u64 total, int *pcyl, int *phead, int *psectorspertrack, bool idegeometry);
+extern void gethdfgeometry(uae_u64 size, struct uaedev_config_info*);
 
-#endif /* MEMORY_H */
+void add_cpuboard_unit(int unit, struct uaedev_config_info *uci, struct romconfig *rc);
+
+#endif /* UAE_FILESYS_H */

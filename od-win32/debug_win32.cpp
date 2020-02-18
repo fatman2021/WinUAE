@@ -30,6 +30,7 @@
 #include "win32.h"
 #include "registry.h"
 #include "win32gui.h"
+#include "fpp.h"
 
 #include "uae.h"
 
@@ -518,7 +519,7 @@ static void ShowBreakpoints(void)
 	for (i = 0; i < BREAKPOINT_TOTAL; i++) {
 		if (!bpnodes[i].enabled)
 			continue;
-		m68k_disasm_2(outbp, sizeof outbp / sizeof (TCHAR), bpnodes[i].addr, NULL, 1, NULL, NULL, 0);
+		m68k_disasm_2(outbp, sizeof outbp / sizeof (TCHAR), bpnodes[i].value1, NULL, 1, NULL, NULL, 0xffffffff, 0);
 		ULBS(outbp);
 		got = 1;
 	}
@@ -574,7 +575,7 @@ static int GetPrevAddr(uae_u32 addr, uae_u32 *prevaddr)
 	dasmaddr = addr - 20;
 	while (dasmaddr < addr) {
 		next = dasmaddr + 2;
-		m68k_disasm_2(NULL, 0, dasmaddr, &next, 1, NULL, NULL, 0);
+		m68k_disasm_2(NULL, 0, dasmaddr, &next, 1, NULL, NULL, 0xffffffff, 0);
 		if (next == addr) {
 			*prevaddr = dasmaddr;
 			return 1;
@@ -606,7 +607,7 @@ static void ShowDasm(int direction)
 	else
 		addr = dbgpage[currpage].dasmaddr;
 	if (direction > 0) {
-		m68k_disasm_2(NULL, 0, addr, &addr, 1, NULL, NULL, 0);
+		m68k_disasm_2(NULL, 0, addr, &addr, 1, NULL, NULL, 0xffffffff, 0);
 		if (!addr || addr < dbgpage[currpage].dasmaddr)
 			addr = dbgpage[currpage].dasmaddr;
 	}
@@ -620,7 +621,7 @@ static void ShowDasm(int direction)
 	lines_old = SendMessage(hDasm, LB_GETCOUNT, 0, 0);
 	lines_new = GetLBOutputLines(hDasm);
 	for (i = 0; i < lines_new; i++) {
-		m68k_disasm_2(out, sizeof out / sizeof (TCHAR), addr, &addr, 1, NULL, NULL, 0);
+		m68k_disasm_2(out, sizeof out / sizeof (TCHAR), addr, &addr, 1, NULL, NULL, 0xffffffff, 0);
 		if (addr > dbgpage[currpage].dasmaddr)
 			UpdateListboxString(hDasm, i, out, FALSE);
 		else
@@ -1949,7 +1950,7 @@ static INT_PTR CALLBACK DebuggerProc (HWND hDlg, UINT message, WPARAM wParam, LP
 					addrstr[10] = 0;
 					addr = _tcstoul(addrstr, NULL, 0);
 					for (i = 0; i < BREAKPOINT_TOTAL; i++) {
-						if (addr == bpnodes[i].addr && bpnodes[i].enabled) {
+						if (addr == bpnodes[i].value1 && bpnodes[i].enabled) {
 							int offset = 0;
 							if (size >= 9)
 								offset = 3;
@@ -2056,9 +2057,18 @@ int open_debug_window(void)
 	dbgaccel = LoadAccelerators(hUIDLL ? hUIDLL : hInst, MAKEINTRESOURCE (IDR_DBGACCEL));
 	nr = getresource(IDD_DEBUGGER);
 	if (nr) {
-		hDbgWnd = CreateDialogIndirect (nr->inst, nr->resource, NULL, DebuggerProc);
-		freescaleresource(nr);
+		typedef DPI_AWARENESS_CONTEXT(CALLBACK *SETTHREADDPIAWARENESSCONTEXT)(DPI_AWARENESS_CONTEXT);
+		SETTHREADDPIAWARENESSCONTEXT pSetThreadDpiAwarenessContext = (SETTHREADDPIAWARENESSCONTEXT)GetProcAddress(userdll, "SetThreadDpiAwarenessContext");
+		DPI_AWARENESS_CONTEXT ac = DPI_AWARENESS_CONTEXT_UNAWARE;
+		if (pSetThreadDpiAwarenessContext) {
+			ac = pSetThreadDpiAwarenessContext(ac);
+		}
+		hDbgWnd = CreateDialogIndirect (nr->inst, nr->sourceresource, NULL, DebuggerProc);
+		if (pSetThreadDpiAwarenessContext) {
+			pSetThreadDpiAwarenessContext(ac);
+		}
 	}
+	freescaleresource(nr);
 	debuggerinitializing = FALSE;
 	if (!hDbgWnd)
 		return 0;
@@ -2182,7 +2192,7 @@ void update_debug_info(void)
 
 	hwnd = GetDlgItem(hDbgWnd, IDC_DBG_FPREG);
 	for (i = 0; i < 8; i++) {
-		_stprintf(out, _T("FP%d: %g"), i, regs.fp[i]);
+		_stprintf(out, _T("FP%d: %s"), i, fpp_print(&regs.fp[i], 0));
 		UpdateListboxString(hwnd, i, out, TRUE);
 	}
 

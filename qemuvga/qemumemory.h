@@ -111,6 +111,7 @@ typedef struct MemoryRegionIoeventfd MemoryRegionIoeventfd;
 typedef struct MemoryRegion {
     /* All fields are private - violators will be prosecuted */
     void *opaque;
+	void *data;
 #if 0
 	const MemoryRegionOps *ops;
     MemoryRegion *parent;
@@ -450,8 +451,10 @@ bool memory_region_get_dirty(MemoryRegion *mr, hwaddr addr,
  * @addr: the address (relative to the start of the region) being dirtied.
  * @size: size of the range being dirtied.
  */
-void memory_region_set_dirty(MemoryRegion *mr, hwaddr addr,
+void linear_memory_region_set_dirty(MemoryRegion *mr, hwaddr addr,
                              hwaddr size);
+void vga_memory_region_set_dirty(MemoryRegion *mr, hwaddr addr,
+							 hwaddr size);
 
 /**
  * memory_region_test_and_clear_dirty: Check whether a range of bytes is dirty

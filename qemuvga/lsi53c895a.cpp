@@ -675,7 +675,7 @@ static void lsi_request_free(LSIState *s, lsi_request *p)
     g_free(p);
 }
 
-static void lsi_request_cancelled(SCSIRequest *req)
+void lsi_request_cancelled(SCSIRequest *req)
 {
     LSIState *s = LSI53C895A(req->bus->qbus.parent);
 	lsi_request *p = (lsi_request*)req->hba_private;
@@ -723,7 +723,8 @@ void lsi_command_complete(SCSIRequest *req, uint32_t status, size_t resid)
     DPRINTF("Command complete status=%d\n", (int)status);
     s->status = status;
     s->command_complete = 2;
-    if (s->waiting && s->dbc != 0) {
+	// this does not seem to be correct (breaks CSPPC SCSI)
+    if (0 && s->waiting && s->dbc != 0) {
         /* Raise phase mismatch for short transfers.  */
         lsi_bad_phase(s, out, PHASE_ST);
     } else {

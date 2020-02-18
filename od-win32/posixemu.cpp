@@ -115,9 +115,19 @@ void uae_sem_post (uae_sem_t * event)
 	SetEvent (*event);
 }
 
+int uae_sem_trywait_delay(uae_sem_t * event, int millis)
+{
+	int v = WaitForSingleObject(*event, millis);
+	if (v == WAIT_OBJECT_0)
+		return 0;
+	if (v == WAIT_ABANDONED)
+		return -2;
+	return -1;
+}
+
 int uae_sem_trywait (uae_sem_t * event)
 {
-	return WaitForSingleObject (*event, 0) == WAIT_OBJECT_0 ? 0 : -1;
+	return uae_sem_trywait_delay(event, 0);
 }
 
 void uae_sem_destroy (uae_sem_t * event)
@@ -126,6 +136,11 @@ void uae_sem_destroy (uae_sem_t * event)
 		CloseHandle (*event);
 		*event = NULL;
 	}
+}
+
+uae_thread_id uae_thread_get_id(void)
+{
+	return (uae_thread_id)GetCurrentThreadId();
 }
 
 #ifndef _CONSOLE
@@ -165,12 +180,19 @@ void uae_end_thread (uae_thread_id *tid)
 	}
 }
 
+typedef BOOL(WINAPI* AVSETMMTHREADPRIORITY)(HANDLE, AVRT_PRIORITY);
+static AVSETMMTHREADPRIORITY pAvSetMmThreadPriority;
+
 int uae_start_thread (const TCHAR *name, void *(*f)(void *), void *arg, uae_thread_id *tid)
 {
 	HANDLE hThread;
 	int result = 1;
 	unsigned foo;
 	struct thparms *thp;
+
+	if (!pAvSetMmThreadPriority && AVTask) {
+		pAvSetMmThreadPriority = (AVSETMMTHREADPRIORITY)GetProcAddress(GetModuleHandle(_T("Avrt.dll")), "AvSetMmThreadPriority");
+	}
 
 	thp = xmalloc (struct thparms, 1);
 	thp->f = f;
@@ -181,8 +203,8 @@ int uae_start_thread (const TCHAR *name, void *(*f)(void *), void *arg, uae_thre
 			//write_log (_T("Thread '%s' started (%d)\n"), name, hThread);
 			if (!AVTask) {
 				SetThreadPriority (hThread, THREAD_PRIORITY_HIGHEST);
-			} else {
-				AvSetMmThreadPriority(AVTask, AVRT_PRIORITY_HIGH);
+			} else if (pAvSetMmThreadPriority) {
+				pAvSetMmThreadPriority(AVTask, AVRT_PRIORITY_HIGH);
 			}
 		}
 	} else {
@@ -202,8 +224,8 @@ int uae_start_thread_fast (void *(*f)(void *), void *arg, uae_thread_id *tid)
 	if (*tid) {
 		if (!AVTask) {
 			SetThreadPriority (*tid, THREAD_PRIORITY_HIGHEST);
-		} else {
-			AvSetMmThreadPriority(AVTask, AVRT_PRIORITY_HIGH);
+		} else if (pAvSetMmThreadPriority) {
+			pAvSetMmThreadPriority(AVTask, AVRT_PRIORITY_HIGH);
 		}
 	}
 	return v;
@@ -238,9 +260,34 @@ void uae_set_thread_priority (uae_thread_id *tid, int pri)
 	if (!AVTask) {
 		if (!SetThreadPriority (GetCurrentThread(), THREAD_PRIORITY_HIGHEST))
 			SetThreadPriority (GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-	} else {
-		AvSetMmThreadPriority(AVTask, AVRT_PRIORITY_HIGH);
+	} else if (pAvSetMmThreadPriority) {
+		pAvSetMmThreadPriority(AVTask, AVRT_PRIORITY_HIGH);
 	}
 }
 
+uae_atomic atomic_and(volatile uae_atomic *p, uae_u32 v)
+{
+	return _InterlockedAnd(p, v);
+}
+uae_atomic atomic_or(volatile uae_atomic *p, uae_u32 v)
+{
+	return _InterlockedOr(p, v);
+}
+void atomic_set(volatile uae_atomic *p, uae_u32 v)
+{
+}
+uae_atomic atomic_inc(volatile uae_atomic *p)
+{
+	return _InterlockedIncrement(p);
+}
+uae_atomic atomic_dec(volatile uae_atomic *p)
+{
+	return _InterlockedDecrement(p);
+}
+
+uae_u32 atomic_bit_test_and_reset(volatile uae_atomic *p, uae_u32 v)
+{
+	return _interlockedbittestandreset(p, v);
+}
 #endif
+

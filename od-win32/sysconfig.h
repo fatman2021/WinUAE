@@ -1,3 +1,5 @@
+#ifndef WINUAE_SYSCONFIG_H
+#define WINUAE_SYSCONFIG_H
 
 #pragma warning (disable : 4761)
 #pragma warning (disable : 4996)
@@ -11,12 +13,13 @@
 #define DRIVESOUND
 #define GFXFILTER
 #define X86_MSVC_ASSEMBLY
-#define X86_MSVC_ASSEMBLY_MEMACCESS
 #define OPTIMIZED_FLAGS
+#define MSVC_LONG_DOUBLE
+#ifndef __i386__
 #define __i386__
+#endif
 #define WINDOWS
 #define ZLIB_WINAPI
-//#define USE_SOFT_LONG_DOUBLE
 #define PACKAGE_STRING "WinUAE"
 
 #ifndef UAE_MINI
@@ -26,6 +29,7 @@
 #define UAE_FILESYS_THREADS
 #define AUTOCONFIG /* autoconfig support, fast ram, harddrives etc.. */
 #define JIT /* JIT compiler support */
+#define USE_JIT_FPU
 #define NATMEM_OFFSET natmem_offset
 #define USE_NORMAL_CALLING_CONVENTION 0
 #define USE_X86_FPUCW 1
@@ -47,10 +51,9 @@
 #define UAESERIAL /* uaeserial.device emulation */
 #define FPUEMU /* FPU emulation */
 #define FPU_UAE
-#define WITH_SOFTFLOAT
 #define MMUEMU /* Aranym 68040 MMU */
 #define FULLMMU /* Aranym 68040 MMU */
-#define CPUEMU_0 /* generic 680x0 emulation with direct memory access */
+#define CPUEMU_0 /* generic 680x0 emulation */
 #define CPUEMU_11 /* 68000/68010 prefetch emulation */
 #define CPUEMU_13 /* 68000/68010 cycle-exact cpu&blitter */
 #define CPUEMU_20 /* 68020 prefetch */
@@ -62,7 +65,10 @@
 #define CPUEMU_31 /* Aranym 68040 MMU */
 #define CPUEMU_32 /* Previous 68030 MMU */
 #define CPUEMU_33 /* 68060 MMU */
-#define CPUEMU_40 /* generic 680x0 with indirect memory access */
+#define CPUEMU_34 /* 68030 MMU + cache */
+#define CPUEMU_35 /* 68030 MMU + cache + CE */
+#define CPUEMU_40 /* generic 680x0 with JIT direct memory access */
+#define CPUEMU_50 /* generic 680x0 with indirect memory access */
 #define ACTION_REPLAY /* Action Replay 1/2/3 support */
 #define PICASSO96 /* Picasso96 display card emulation */
 #define UAEGFX_INTERNAL /* built-in libs:picasso96/uaegfx.card */
@@ -88,12 +94,16 @@
 #define WITH_LUA /* lua scripting */
 #define WITH_UAENATIVE
 #define WITH_SLIRP
+#define WITH_BUILTIN_SLIRP
 #define WITH_TABLETLIBRARY
 #define WITH_UAENET_PCAP
 #define WITH_PPC
 #define WITH_QEMU_CPU
 #define WITH_TOCCATA
 #define WITH_PCI
+#define WITH_X86
+#define WITH_THREADED_CPU
+
 
 #else
 
@@ -126,7 +136,7 @@
 #define A_WRP
 
 #ifndef PATH_MAX
-#define PATH_MAX 256
+#define PATH_MAX MAX_DPATH
 #endif
 
 #define UAE_RAND_MAX RAND_MAX
@@ -147,9 +157,7 @@
 #ifdef WIN64
 #undef X86_MSVC_ASSEMBLY_MEMACCESS
 #undef X86_MSVC_ASSEMBLY
-#undef JIT
 #define X64_MSVC_ASSEMBLY
-#define CPU_64_BIT
 #define SIZEOF_VOID_P 8
 #else
 #define SIZEOF_VOID_P 4
@@ -158,6 +166,8 @@
 #if !defined(AHI)
 #undef ENFORCER
 #endif
+
+typedef long uae_atomic;
 
 /* src/sysconfig.h.  Generated automatically by configure.  */
 /* src/sysconfig.h.in.  Generated automatically from configure.in by autoheader.  */
@@ -317,6 +327,10 @@
 #define HAVE_ISNAN
 #undef HAVE_ISINF
 #define isnan _isnan
+
+#ifndef LT_MODULE_EXT
+#define LT_MODULE_EXT _T(".dll")
+#endif
 
 /* Define if you have the bcopy function.  */
 /* #undef HAVE_BCOPY */
@@ -555,11 +569,6 @@
 /* Define if you have the <utime.h> header file.  */
 /* #undef HAVE_UTIME_H */
 
-/* Define if you have the <values.h> header file.  */
-#ifdef __GNUC__
-#define HAVE_VALUES_H 1
-#endif
-
 /* Define if you have the <windows.h> header file.  */
 #define HAVE_WINDOWS_H 1
 
@@ -568,3 +577,5 @@
 
 /* Define to 1 if `S_un' is a member of `struct in_addr'. */
 #define HAVE_STRUCT_IN_ADDR_S_UN 1
+
+#endif /* WINUAE_SYSCONFIG_H */

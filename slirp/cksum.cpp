@@ -68,11 +68,13 @@ int cksum(struct mbuf *m, int len)
 	
 	if (len < mlen)
 	   mlen = len;
+#ifdef DEBUG
 	len -= mlen;
+#endif
 	/*
 	 * Force to even boundary.
 	 */
-	if ((1 & (long) w) && (mlen > 0)) {
+	if ((1 & (uintptr_t) w) && (mlen > 0)) {
 		REDUCE;
 		sum <<= 8;
 		s_util.c[0] = *(u_int8_t *)w;

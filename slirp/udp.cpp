@@ -84,7 +84,7 @@ void udp_input(struct mbuf *m, int iphlen)
 	struct socket *so;
 	
 	DEBUG_CALL("udp_input");
-	DEBUG_ARG("m = %lx", (long)m);
+	DEBUG_ARG("m = %p", m);
 	DEBUG_ARG("iphlen = %d", iphlen);
 	
 	udpstat.udps_ipackets++;
@@ -259,8 +259,8 @@ int udp_output2(struct socket *so, struct mbuf *m,
 	int error = 0;
 
 	DEBUG_CALL("udp_output");
-	DEBUG_ARG("so = %lx", (long)so);
-	DEBUG_ARG("m = %lx", (long)m);
+	DEBUG_ARG("so = %p", so);
+	DEBUG_ARG("m = %p", m);
 	DEBUG_ARG("saddr = %lx", (long)saddr->sin_addr.s_addr);
 	DEBUG_ARG("daddr = %lx", (long)daddr->sin_addr.s_addr);
 
@@ -278,7 +278,7 @@ int udp_output2(struct socket *so, struct mbuf *m,
 	memset(&ui->ui_i.ih_mbuf, 0 , sizeof(struct mbuf_ptr));
 	ui->ui_x1 = 0;
 	ui->ui_pr = IPPROTO_UDP;
-	ui->ui_len = htons(m->m_len - sizeof(struct ip)); /* + sizeof (struct udphdr)); */
+	ui->ui_len = htons((u_short) (m->m_len - sizeof(struct ip))); /* + sizeof (struct udphdr)); */
 	/* XXXXX Check for from-one-location sockets, or from-any-location sockets */
         ui->ui_src = saddr->sin_addr;
 	ui->ui_dst = daddr->sin_addr;
@@ -294,7 +294,7 @@ int udp_output2(struct socket *so, struct mbuf *m,
 	    if ((ui->ui_sum = cksum(m, /* sizeof (struct udpiphdr) + */ m->m_len)) == 0)
 		ui->ui_sum = 0xffff;
 	}
-	((struct ip *)ui)->ip_len = m->m_len;
+	((struct ip *)ui)->ip_len = (u_int16_t)m->m_len;
 
 	((struct ip *)ui)->ip_ttl = ip_defttl;
 	((struct ip *)ui)->ip_tos = iptos;
@@ -324,36 +324,32 @@ int udp_output(struct socket *so, struct mbuf *m,
     return udp_output2(so, m, &saddr, &daddr, so->so_iptos);
 }
 
-SOCKET udp_attach(struct socket *so)
+SLIRP_SOCKET udp_attach(struct socket *so)
 {
-  struct sockaddr_in addr;
+	struct sockaddr_in addr;
 	
-  if((so->s = socket(AF_INET,SOCK_DGRAM,0)) != -1) {
-    /*
-     * Here, we bind() the socket.  Although not really needed
-     * (sendto() on an unbound socket will bind it), it's done
-     * here so that emulation of ytalk etc. don't have to do it
-     */
-	memset(&addr, 0, sizeof(struct sockaddr_in));
-    addr.sin_family = AF_INET;
-    addr.sin_port = 0;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    if(bind(so->s, (struct sockaddr *)&addr, sizeof(addr))<0) {
-      int lasterrno=errno;
-      closesocket(so->s);
-      so->s=-1;
-#ifdef _WIN32
-      WSASetLastError(lasterrno);
-#else
-      errno=lasterrno;
-#endif
-    } else {
-      /* success, insert in queue */
-      so->so_expire = curtime + SO_EXPIRE;
-      insque(so,&udb);
-    }
-  }
-  return(so->s);
+	if((so->s = socket(AF_INET,SOCK_DGRAM,0)) != -1) {
+	/*
+	 * Here, we bind() the socket.  Although not really needed
+	 * (sendto() on an unbound socket will bind it), it's done
+	 * here so that emulation of ytalk etc. don't have to do it
+	 */
+		memset(&addr, 0, sizeof(struct sockaddr_in));
+		addr.sin_family = AF_INET;
+		addr.sin_port = 0;
+		addr.sin_addr.s_addr = INADDR_ANY;
+		if(bind(so->s, (struct sockaddr *)&addr, sizeof(addr))<0) {
+			int error = WSAGetLastError();
+			closesocket(so->s);
+			so->s = -1;
+			WSASetLastError(error);
+		} else {
+			/* success, insert in queue */
+			so->so_expire = curtime + SO_EXPIRE;
+			insque(so,&udb);
+		}
+	}
+	return(so->s);
 }
 
 void udp_detach(struct socket *so)

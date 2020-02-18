@@ -1,6 +1,3 @@
-#ifndef UAE_SYSDEPS_H
-#define UAE_SYSDEPS_H
-
 /*
   * UAE - The Un*x Amiga Emulator
   *
@@ -14,13 +11,68 @@
   *
   * Copyright 1996, 1997 Bernd Schmidt
   */
+#ifndef UAE_SYSDEPS_H
+#define UAE_SYSDEPS_H
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+#include "sysconfig.h"
+
+#ifndef UAE
+#define UAE
+#endif
+
+#ifdef __cplusplus
 #include <string>
 using namespace std;
+#else
+#include <string.h>
+#include <ctype.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <assert.h>
 #include <limits.h>
+
+#ifndef UAE
+#define UAE
+#endif
+
+#if defined(__x86_64__) || defined(_M_AMD64)
+#define CPU_x86_64 1
+#define CPU_64_BIT 1
+#elif defined(__i386__) || defined(_M_IX86)
+#define CPU_i386 1
+#elif defined(__arm__) || defined(_M_ARM)
+#define CPU_arm 1
+#elif defined(__powerpc__) || defined(_M_PPC)
+#define CPU_powerpc 1
+#else
+#error unrecognized CPU type
+#endif
+
+#ifdef _WIN32
+/* Parameters are passed in ECX, EDX for both x86 and x86-64 (RCX, RDX).
+ * For x86-64, __fastcall is the default, so it isn't really required. */
+#define JITCALL __fastcall
+#elif defined(CPU_x86_64)
+/* Parameters are passed in RDI, RSI by default (System V AMD64 ABI). */
+#define JITCALL
+#elif defined(HAVE_FUNC_ATTRIBUTE_REGPARM)
+/* Parameters are passed in EAX, EDX on x86 with regparm(2). */
+#define JITCALL __attribute__((regparm(2)))
+/* This was originally regparm(3), but as far as I can see only two register
+ * params are supported by the JIT code. It probably just worked anyway
+ * if all functions used max two arguments. */
+#elif !defined(JIT)
+#define JITCALL
+#endif
+#define REGPARAM
+#define REGPARAM2 JITCALL
+#define REGPARAM3 JITCALL
+
 #include <tchar.h>
 
 #ifndef __STDC__
@@ -94,10 +146,6 @@ using namespace std;
 #include <errno.h>
 #include <assert.h>
 
-#if EEXIST == ENOTEMPTY
-#define BROKEN_OS_PROBABLY_AIX
-#endif
-
 #ifdef __NeXT__
 #define S_IRUSR S_IREAD
 #define S_IWUSR S_IWRITE
@@ -108,72 +156,6 @@ struct utimbuf
     time_t actime;
     time_t modtime;
 };
-#endif
-
-#if defined(__GNUC__) && defined(AMIGA)
-/* gcc on the amiga need that __attribute((regparm)) must */
-/* be defined in function prototypes as well as in        */
-/* function definitions !                                 */
-#define REGPARAM2 REGPARAM
-#else /* not(GCC & AMIGA) */
-#define REGPARAM2
-#endif
-
-/* sam: some definitions so that SAS/C can compile UAE */
-#if defined(__SASC) && defined(AMIGA)
-#define REGPARAM2
-#define REGPARAM
-#define S_IRUSR S_IREAD
-#define S_IWUSR S_IWRITE
-#define S_IXUSR S_IEXECUTE
-#define S_ISDIR(val) (S_IFDIR & val)
-#define mkdir(x,y) mkdir(x)
-#define truncate(x,y) 0
-#define creat(x,y) open("T:creat",O_CREAT|O_TEMP|O_RDWR) /* sam: for zfile.c */
-#define strcasecmp stricmp
-#define utime(file,time) 0
-struct utimbuf
-{
-    time_t actime;
-    time_t modtime;
-};
-#endif
-
-#if defined(WARPUP)
-#include "devices/timer.h"
-#include "osdep/posixemu.h"
-#define REGPARAM
-#define REGPARAM2
-#define RETSIGTYPE
-#define USE_ZFILE
-#define strcasecmp stricmp
-#define memcpy q_memcpy
-#define memset q_memset
-#define strdup my_strdup
-#define random uaerand
-#define creat(x,y) open("T:creat",O_CREAT|O_RDWR|O_TRUNC,777)
-extern void* q_memset(void*,int,size_t);
-extern void* q_memcpy(void*,const void*,size_t);
-#endif
-
-#ifdef __DOS__
-#include <pc.h>
-#include <io.h>
-#endif
-
-/* Acorn specific stuff */
-#ifdef ACORN
-
-#define S_IRUSR S_IREAD
-#define S_IWUSR S_IWRITE
-#define S_IXUSR S_IEXEC
-
-#define strcasecmp stricmp
-
-#endif
-
-#ifndef L_tmpnam
-#define L_tmpnam 128 /* ought to be safe */
 #endif
 
 /* If char has more then 8 bits, good night. */
@@ -225,6 +207,12 @@ typedef uae_u32 uaecptr;
 #define UVAL64(a) (a ## ul)
 #endif
 
+uae_atomic atomic_and(volatile uae_atomic *p, uae_u32 v);
+uae_atomic atomic_or(volatile uae_atomic *p, uae_u32 v);
+uae_atomic atomic_inc(volatile uae_atomic *p);
+uae_atomic atomic_dec(volatile uae_atomic *p);
+uae_u32 atomic_bit_test_and_reset(volatile uae_atomic *p, uae_u32 v);
+
 #ifdef HAVE_STRDUP
 #define my_strdup _tcsdup
 #else
@@ -248,6 +236,7 @@ extern TCHAR *utf8u (const char *s);
 extern void unicode_init (void);
 extern void to_lower (TCHAR *s, int len);
 extern void to_upper (TCHAR *s, int len);
+
 /* We can only rely on GNU C getting enums right. Mickeysoft VSC++ is known
  * to have problems, and it's likely that other compilers choke too. */
 #ifdef __GNUC__
@@ -282,8 +271,11 @@ extern void to_upper (TCHAR *s, int len);
 #define DONT_HAVE_POSIX
 #endif
 
-#if defined _WIN32
+#if !defined(FSUAE) && defined _WIN32
 
+//#ifdef FSUAE
+//#error _WIN32 should not be defined here
+//#endif
 #if defined __WATCOMC__
 
 #define O_NDELAY 0
@@ -294,7 +286,18 @@ extern void to_upper (TCHAR *s, int len);
 
 #elif defined __MINGW32__
 
+#include <winsock.h>
+
 #define O_NDELAY 0
+
+#define FILEFLAG_DIR     0x1
+#define FILEFLAG_ARCHIVE 0x2
+#define FILEFLAG_WRITE   0x4
+#define FILEFLAG_READ    0x8
+#define FILEFLAG_EXECUTE 0x10
+#define FILEFLAG_SCRIPT  0x20
+#define FILEFLAG_PURE    0x40
+
 #define mkdir(a,b) mkdir(a)
 
 #elif defined _MSC_VER
@@ -313,13 +316,6 @@ extern void gettimeofday( struct timeval *tv, void *blah );
 #define FILEFLAG_EXECUTE 0x10
 #define FILEFLAG_SCRIPT  0x20
 #define FILEFLAG_PURE    0x40
-
-#ifdef REGPARAM2
-#undef REGPARAM2
-#endif
-#define REGPARAM2 __fastcall
-#define REGPARAM3 __fastcall
-#define REGPARAM
 
 #include <io.h>
 #define O_BINARY _O_BINARY
@@ -443,11 +439,13 @@ extern void mallocemu_free (void *ptr);
 #endif
 
 #if __GNUC__ - 1 > 1 || __GNUC_MINOR__ - 1 > 6
-extern void write_log (const TCHAR *, ...) __attribute__ ((format (printf, 1, 2)));
-extern void write_log (char *, ...) __attribute__ ((format (printf, 1, 2)));
+extern void write_log(const TCHAR *, ...);
+extern void write_logx(const TCHAR *, ...);
+extern void write_log(const char *, ...) __attribute__ ((format (printf, 1, 2)));
 #else
-extern void write_log (const TCHAR *, ...);
-extern void write_log (const char *, ...);
+extern void write_log(const TCHAR *, ...);
+extern void write_logx(const TCHAR *, ...);
+extern void write_log(const char *, ...);
 #endif
 extern void write_dlog (const TCHAR *, ...);
 extern int read_log(void);
@@ -471,14 +469,16 @@ extern int gui_message_multibutton (int flags, const TCHAR *format,...);
 extern void logging_init (void);
 extern FILE *log_open (const TCHAR *name, int append, int bootlog, TCHAR*);
 extern void log_close (FILE *f);
+extern TCHAR *write_log_get_ts(void);
 
+extern bool use_long_double;
 
 #ifndef O_BINARY
 #define O_BINARY 0
 #endif
 
 #ifndef STATIC_INLINE
-#if __GNUC__ - 1 > 1 && __GNUC_MINOR__ - 1 >= 0
+#if __GNUC__ - 1 > 2 || (__GNUC__ - 1 == 2 && __GNUC_MINOR__ - 1 >= 0)
 #define STATIC_INLINE static __inline__ __attribute__ ((always_inline))
 #define NOINLINE __attribute__ ((noinline))
 #define NORETURN __attribute__ ((noreturn))
@@ -492,7 +492,6 @@ extern void log_close (FILE *f);
 #define NORETURN
 #endif
 #endif
-
 /* Every Amiga hardware clock cycle takes this many "virtual" cycles.  This
    used to be hardcoded as 1, but using higher values allows us to time some
    stuff more precisely.
@@ -538,8 +537,6 @@ extern void log_close (FILE *f);
 # endif
 #endif
 
-#endif
-
 #ifndef __cplusplus
 
 #define xmalloc(T, N) malloc(sizeof (T) * (N))
@@ -563,3 +560,11 @@ extern void xfree (const void*);
 #endif
 
 #define DBLEQU(f, i) (abs ((f) - (i)) < 0.000001)
+
+#ifdef HAVE_VAR_ATTRIBUTE_UNUSED
+#define NOWARN_UNUSED(x) __attribute__((unused)) x
+#else
+#define NOWARN_UNUSED(x) x
+#endif
+
+#endif /* UAE_SYSDEPS_H */

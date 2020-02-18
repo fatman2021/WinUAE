@@ -1,3 +1,11 @@
+#ifndef UAE_PICASSO96_H
+#define UAE_PICASSO96_H
+
+#include "uae/types.h"
+#include "traps.h"
+
+void picasso96_alloc (TrapContext* ctx);
+uae_u32 picasso_demux (uae_u32 arg, TrapContext *ctx);
 
 #ifdef WIN32
 
@@ -217,7 +225,7 @@ struct BitMap
 
 struct Settings {
     uae_u32					BoardType;
-    /* a value discribing assignment to nth board local to boardtype
+    /* a value describing assignment to nth board local to boardtype
      * to be used for reassignment when boards are added or removed.  */
     uae_u16					LocalOrdering;
     uae_s16					LastSelected;
@@ -585,3 +593,5 @@ extern int p96refresh_active;
 #endif
 
 #endif
+
+#endif /* UAE_PICASSO96_H */

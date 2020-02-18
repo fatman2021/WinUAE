@@ -84,7 +84,7 @@ static void parsemessage(TCHAR *in, struct uae_prefs *p, TCHAR *out, int outsize
 		for (;;) {
 			int ret;
 			tmpout[0] = 0;
-			ret = cfgfile_modify (index, in, _tcslen (in), tmpout, sizeof (tmpout) * sizeof (TCHAR));
+			ret = cfgfile_modify (index, in, _tcslen (in), tmpout, sizeof (tmpout) / sizeof (TCHAR));
 			index++;
 			if (_tcslen (tmpout) > 0) {
 				if (_tcslen (out) == 0)
@@ -344,7 +344,7 @@ int checkIPC (void *vipc, struct uae_prefs *p)
 			if (_tcslen (out) >= IPC_BUFFER_SIZE)
 				out[IPC_BUFFER_SIZE - 1] = 0;
 			_tcscpy ((TCHAR*)ipc->outbuf, out);
-			outlen = _tcsclen ((TCHAR*)ipc->outbuf) + sizeof (TCHAR);
+			outlen = (_tcsclen ((TCHAR*)ipc->outbuf) + 1) * sizeof (TCHAR);
 		} else {
 			ua_copy ((uae_char*)ipc->outbuf, sizeof ipc->outbuf, out);
 			outlen = strlen ((char*)ipc->outbuf) + sizeof (char);

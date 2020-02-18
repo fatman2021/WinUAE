@@ -1,3 +1,7 @@
+#ifndef UAE_ZARCHIVE_H
+#define UAE_ZARCHIVE_H
+
+#include "uae/types.h"
 
 typedef uae_s64 (*ZFILEREAD)(void*, uae_u64, uae_u64, struct zfile*);
 typedef uae_s64 (*ZFILEWRITE)(const void*, uae_u64, uae_u64, struct zfile*);
@@ -68,7 +72,6 @@ struct zvolume
     struct znode *parentz;
     struct zvolume *parent;
     uae_s64 size;
-    unsigned int blocks;
     unsigned int id;
     uae_s64 archivesize;
     unsigned int method;
@@ -144,3 +147,5 @@ extern struct zfile *archive_getzfile (struct znode *zn, unsigned int id, int fl
 extern struct zfile *archive_unpackzfile (struct zfile *zf);
 
 extern struct zfile *decompress_zfd (struct zfile*);
+
+#endif /* UAE_ZARCHIVE_H */

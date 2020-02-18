@@ -20,6 +20,7 @@ extern int setup_sound (void);
 extern void resume_sound (void);
 extern void pause_sound (void);
 extern void reset_sound (void);
+extern bool sound_paused (void);
 extern void sound_setadjust (double);
 extern int enumerate_sound_devices (void);
 extern int drivesound_init (void);
@@ -46,17 +47,19 @@ struct sound_data
 	int sndbufframes;
 	int softvolume;
 	struct sound_dp *data;
+	int index;
+	bool reset;
+	int resetcnt;
+	int resetframe;
+	int resetframecnt;
 };
 
 
-void send_sound (struct sound_data *sd, uae_u16 *sndbuffer);
 int open_sound_device (struct sound_data *sd, int index, int exclusive, int bufsize, int freq, int channels);
 void close_sound_device (struct sound_data *sd);
 void pause_sound_device (struct sound_data *sd);
 void resume_sound_device (struct sound_data *sd);
 void set_volume_sound_device (struct sound_data *sd, int volume, int mute);
-int get_offset_sound_device (struct sound_data *sd);
-int blocking_sound_device (struct sound_data *sd);
 
 #if SOUNDSTUFF > 0
 extern int outputsample, doublesample;

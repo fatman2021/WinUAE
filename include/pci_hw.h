@@ -1,4 +1,7 @@
+#ifndef UAE_PCI_HW_H
+#define UAE_PCI_HW_H
 
+#include "uae/types.h"
 
 #define MAX_PCI_BOARDS 6
 #define MAX_PCI_BARS 7
@@ -6,7 +9,7 @@
 typedef uae_u32(REGPARAM3 *pci_get_func)(struct pci_board_state*,uaecptr) REGPARAM;
 typedef void (REGPARAM3 *pci_put_func)(struct pci_board_state*,uaecptr,uae_u32) REGPARAM;
 typedef void (*pci_dev_irq)(struct pci_board_state*,bool);
-typedef bool(*pci_dev_init)(struct pci_board_state*);
+typedef bool(*pci_dev_init)(struct pci_board_state*,struct autoconfig_info*);
 typedef void(*pci_dev_reset)(struct pci_board_state*);
 typedef void(*pci_dev_hsync)(struct pci_board_state*);
 typedef void(*pci_dev_free)(struct pci_board_state*);
@@ -44,7 +47,6 @@ struct pci_board
 	pci_dev_free free;
 	pci_dev_reset reset;
 	pci_dev_hsync hsync;
-	pci_dev_irq irq;
 	pci_addrbank bars[MAX_PCI_BARS];
 };
 
@@ -64,6 +66,7 @@ struct pci_board_state
 	bool memory_map_active;
 	bool io_map_active;
 	struct pci_bridge *bridge;
+	pci_dev_irq irq_callback;
 };
 
 struct pci_bridge
@@ -105,18 +108,18 @@ struct pci_bridge
 	int slot_cnt;
 };
 
-extern void pci_free(void);
-extern void pci_reset(void);
-extern void pci_rethink(void);
-
-extern addrbank *dkb_wildfire_pci_init(struct romconfig *rc);
-
 extern void pci_irq_callback(struct pci_board_state *pcibs, bool irq);
 extern void pci_write_dma(struct pci_board_state *pcibs, uaecptr addr, uae_u8*, int size);
 extern void pci_read_dma(struct pci_board_state *pcibs, uaecptr addr, uae_u8*, int size);
 
 extern const struct pci_board ne2000_pci_board;
+extern const struct pci_board ne2000_pci_board_x86;
+extern const struct pci_board ne2000_pci_board_pcmcia;
+extern const struct pci_board ne2000_pci_board;
+
 extern const struct pci_board es1370_pci_board;
 extern const struct pci_board fm801_pci_board;
 extern const struct pci_board fm801_pci_board_func1;
 extern const struct pci_board solo1_pci_board;
+
+#endif /* UAE_PCI_HW_H */

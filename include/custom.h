@@ -6,9 +6,10 @@
 * (c) 1995 Bernd Schmidt
 */
 
-#ifndef CUSTOM_H
-#define CUSTOM_H
+#ifndef UAE_CUSTOM_H
+#define UAE_CUSTOM_H
 
+#include "uae/types.h"
 #include "machdep/rpt.h"
 
 /* These are the masks that are ORed together in the chipset_mask option.
@@ -34,18 +35,15 @@ extern void custom_reset (bool hardreset, bool keyboardreset);
 extern int intlev (void);
 extern void dumpcustom (void);
 
-extern void do_disk (void);
 extern void do_copper (void);
 
 extern void notice_new_xcolors (void);
-extern void notice_screen_contents_lost (void);
+extern void notice_screen_contents_lost(int monid);
 extern void init_row_map (void);
 extern void init_hz_normal (void);
 extern void init_custom (void);
 
-extern bool picasso_requested_on;
-extern bool picasso_on;
-extern void set_picasso_hack_rate (int hz);
+extern void set_picasso_hack_rate(int hz);
 
 /* Set to 1 to leave out the current frame in average frame time calculation.
 * Useful if the debugger was active.  */
@@ -56,8 +54,6 @@ extern uae_u16 dmacon;
 extern uae_u16 intena, intreq, intreqr;
 
 extern int vpos, lof_store;
-
-extern int find_copper_record (uaecptr, int *, int *);
 
 extern int n_frames;
 
@@ -70,6 +66,7 @@ STATIC_INLINE int dmaen (unsigned int dmamask)
 #define SPCFLAG_COPPER 4
 #define SPCFLAG_INT 8
 #define SPCFLAG_BRK 16
+#define SPCFLAG_UAEINT 32
 #define SPCFLAG_TRACE 64
 #define SPCFLAG_DOTRACE 128
 #define SPCFLAG_DOINT 256 /* arg, JIT fails without this.. */
@@ -88,11 +85,12 @@ extern uae_u16 adkcon;
 extern unsigned int joy0dir, joy1dir;
 extern int joy0button, joy1button;
 
-extern void INTREQ (uae_u16);
-extern bool INTREQ_0 (uae_u16);
-extern void INTREQ_f (uae_u16);
-extern void send_interrupt (int num, int delay);
-extern uae_u16 INTREQR (void);
+extern void INTREQ(uae_u16);
+extern bool INTREQ_0(uae_u16);
+extern void INTREQ_f(uae_u16);
+extern void send_interrupt(int num, int delay);
+extern void rethink_uae_int(void);
+extern uae_u16 INTREQR(void);
 
 /* maximums for statically allocated tables */
 #ifdef UAE_MINI
@@ -128,8 +126,8 @@ extern int maxhpos, maxhpos_short;
 extern int maxvpos, maxvpos_nom, maxvpos_display;
 extern int hsyncstartpos, hsyncendpos;
 extern int minfirstline, vblank_endline, numscrlines;
-extern double vblank_hz, fake_vblank_hz;
-extern double hblank_hz;
+extern float vblank_hz, fake_vblank_hz;
+extern float hblank_hz;
 extern int vblank_skip, doublescan;
 extern bool programmedmode;
 
@@ -222,7 +220,8 @@ STATIC_INLINE int GET_PLANES(uae_u16 bplcon0)
 
 extern void fpscounter_reset (void);
 extern unsigned long idletime;
-extern int lightpen_x, lightpen_y, lightpen_cx, lightpen_cy, lightpen_active, lightpen_enabled;
+extern int lightpen_x[2], lightpen_y[2];
+extern int lightpen_cx[2], lightpen_cy[2], lightpen_active, lightpen_enabled, lightpen_enabled2;
 
 struct customhack {
 	uae_u16 v;
@@ -235,8 +234,17 @@ extern void alloc_cycle_blitter (int hpos, uaecptr *ptr, int);
 extern bool ispal (void);
 extern bool isvga (void);
 extern int current_maxvpos (void);
-extern struct chipset_refresh *get_chipset_refresh (void);
+extern struct chipset_refresh *get_chipset_refresh (struct uae_prefs*);
 extern void compute_framesync (void);
 extern void getsyncregisters(uae_u16 *phsstrt, uae_u16 *phsstop, uae_u16 *pvsstrt, uae_u16 *pvsstop);
+int is_bitplane_dma (int hpos);
+void custom_cpuchange(void);
 
-#endif /* CUSTOM_H */
+struct custom_store
+{
+	uae_u16 value;
+	uae_u32 pc;
+};
+extern struct custom_store custom_storage[256];
+
+#endif /* UAE_CUSTOM_H */

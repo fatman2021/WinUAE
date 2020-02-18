@@ -40,25 +40,25 @@ static int valid_volumename (struct uaedev_mount_info *mountinfo, const TCHAR *v
 }
 
 /* Returns 1 if an actual volume-name was found, 2 if no volume-name (so uses some defaults) */
-int target_get_volume_name (struct uaedev_mount_info *mtinf, const TCHAR *volumepath, TCHAR *volumename, int size, bool inserted, bool fullcheck)
+int target_get_volume_name (struct uaedev_mount_info *mtinf, struct uaedev_config_info *ci, bool inserted, bool fullcheck, int cnt)
 {
 	int result = 2;
 	int drivetype;
 
-	drivetype = GetDriveType (volumepath);
+	drivetype = GetDriveType (ci->rootdir);
 	if (inserted) {
-		if (GetVolumeInformation (volumepath, volumename, size, NULL, NULL, NULL, NULL, 0) &&
-			volumename[0] && 
-			valid_volumename (mtinf, volumename, fullcheck)) {
+		if (GetVolumeInformation (ci->rootdir, ci->volname, sizeof ci->volname / sizeof (TCHAR), NULL, NULL, NULL, NULL, 0) &&
+			ci->volname[0] &&
+			valid_volumename (mtinf, ci->volname, fullcheck)) {
 				// +++Bernd Roesch
-				if(!_tcscmp (volumename, _T("AmigaOS35")))
-					_tcscpy (volumename, _T("AmigaOS3.5"));
-				if(!_tcscmp (volumename, _T("AmigaOS39")))
-					_tcscpy (volumename, _T("AmigaOS3.9"));
-				if(!_tcscmp (volumename, _T("AmigaOS_XL")))
-					_tcscpy (volumename, _T("AmigaOS XL"));
+				if(!_tcscmp (ci->volname, _T("AmigaOS35")))
+					_tcscpy (ci->volname, _T("AmigaOS3.5"));
+				if(!_tcscmp (ci->volname, _T("AmigaOS39")))
+					_tcscpy (ci->volname, _T("AmigaOS3.9"));
+				if(!_tcscmp (ci->volname, _T("AmigaOS_XL")))
+					_tcscpy (ci->volname, _T("AmigaOS XL"));
 				// ---Bernd Roesch
-				if (_tcslen (volumename) > 0)
+				if (_tcslen (ci->volname) > 0)
 					result = 1;
 		}
 	}
@@ -67,24 +67,36 @@ int target_get_volume_name (struct uaedev_mount_info *mtinf, const TCHAR *volume
 		switch(drivetype)
 		{
 		case DRIVE_FIXED:
-			_stprintf (volumename, _T("WinDH_%c"), volumepath[0]);
+			_stprintf (ci->volname, _T("WinDH_%c"), ci->rootdir[0]);
 			break;
 		case DRIVE_CDROM:
-			_stprintf (volumename, _T("WinCD_%c"), volumepath[0]);
+			_stprintf (ci->volname, _T("WinCD_%c"), ci->rootdir[0]);
 			break;
 		case DRIVE_REMOVABLE:
-			_stprintf (volumename, _T("WinRMV_%c"), volumepath[0]);
+			_stprintf (ci->volname, _T("WinRMV_%c"), ci->rootdir[0]);
 			break;
 		case DRIVE_REMOTE:
-			_stprintf (volumename, _T("WinNET_%c"), volumepath[0]);
+			_stprintf (ci->volname, _T("WinNET_%c"), ci->rootdir[0]);
 			break;
 		case DRIVE_RAMDISK:
-			_stprintf (volumename, _T("WinRAM_%c"), volumepath[0]);
+			_stprintf (ci->volname, _T("WinRAM_%c"), ci->rootdir[0]);
 			break;
 		case DRIVE_UNKNOWN:
 		case DRIVE_NO_ROOT_DIR:
 		default:
 			result = 0;
+			break;
+		}
+	}
+
+	if (cnt >= 0) {
+		switch (drivetype)
+		{
+			case DRIVE_REMOTE:
+			_stprintf(ci->devname, _T("NDH%d"), cnt);
+			break;
+			case DRIVE_CDROM:
+			_stprintf(ci->devname, _T("CDH%d"), cnt);
 			break;
 		}
 	}
@@ -108,11 +120,13 @@ static int getidfromhandle (HANDLE h)
 	return drvnum;
 }
 
+HANDLE hdf_get_real_handle(struct hardfilehandle *h);
+
 static int hfdcheck (TCHAR drive)
 {
 	HANDLE h;
 	TCHAR tmp[16];
-	int disknum, i;
+	int disknum;
 
 	_stprintf (tmp, _T("\\\\.\\%c:"), drive);
 	h = CreateFile (tmp, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -120,14 +134,19 @@ static int hfdcheck (TCHAR drive)
 		return 0;
 	disknum = getidfromhandle (h);
 	CloseHandle (h);
-	for (i = 0; i < MAX_FILESYSTEM_UNITS; i++) {
+#if 0
+	for (int i = 0; i < MAX_FILESYSTEM_UNITS; i++) {
 		struct hardfiledata *hfd = get_hardfile_data (i);
 		int reopen = 0;
 		if (!hfd || !(hfd->flags & HFD_FLAGS_REALDRIVE) || !hfd->handle_valid)
 			continue;
-		if (getidfromhandle (hfd->handle) == disknum)
-			return 1;
+		HANDLE h2 = hdf_get_real_handle(hfd->handle);
+		if (h2) {
+			if (getidfromhandle (h2) == disknum)
+				return 1;
+		}
 	}
+#endif
 	return 0;
 }
 
@@ -137,6 +156,7 @@ void filesys_addexternals (void)
 	UINT errormode;
 	DWORD dwDriveMask;
 	int drvnum = 0;
+	int cnt = 0;
 
 	if (!currprefs.win32_automount_cddrives && !currprefs.win32_automount_netdrives
 		&& !currprefs.win32_automount_drives && !currprefs.win32_automount_removabledrives)
@@ -178,7 +198,7 @@ void filesys_addexternals (void)
 			if (nok)
 				continue;
 			if (inserted) {
-				target_get_volume_name (&mountinfo, ci.rootdir, ci.volname, MAX_DPATH, inserted, true);
+				target_get_volume_name (&mountinfo, &ci, inserted, true, cnt++);
 				if (!ci.volname[0])
 					_stprintf (ci.volname, _T("WinUNK_%c"), drive);
 			}
@@ -195,7 +215,7 @@ void filesys_addexternals (void)
 			ci.readonly = !rw;
 			ci.bootpri = -20 - drvnum;
 			//write_log (_T("Drive type %d: '%s' '%s'\n"), drivetype, volumepath, volumename);
-			add_filesys_unit (&ci);
+			add_filesys_unit (&ci, true);
 			drvnum++;
 		} /* if drivemask */
 		dwDriveMask >>= 1;

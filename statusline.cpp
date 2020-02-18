@@ -10,6 +10,7 @@
 #include "gui.h"
 #include "custom.h"
 #include "drawing.h"
+#include "inputdevice.h"
 #include "statusline.h"
 
 #define STATUSLINE_MS 3000
@@ -18,8 +19,9 @@
 * Some code to put status information on the screen.
 */
 
-void statusline_getpos (int *x, int *y, int width, int height)
+void statusline_getpos(int monid, int *x, int *y, int width, int height, int hx, int vx)
 {
+	int total_height = TD_TOTAL_HEIGHT * vx;
 	if (currprefs.osd_pos.x >= 20000) {
 		if (currprefs.osd_pos.x >= 30000)
 			*y = width * (currprefs.osd_pos.x - 30000) / 1000;
@@ -33,28 +35,28 @@ void statusline_getpos (int *x, int *y, int width, int height)
 	}
 	if (currprefs.osd_pos.y >= 20000) {
 		if (currprefs.osd_pos.y >= 30000)
-			*y = (height - TD_TOTAL_HEIGHT) * (currprefs.osd_pos.y - 30000) / 1000;
+			*y = (height - total_height) * (currprefs.osd_pos.y - 30000) / 1000;
 		else
-			*y = (height - TD_TOTAL_HEIGHT) - ((height - TD_TOTAL_HEIGHT) * (30000 - currprefs.osd_pos.y) / 1000);
+			*y = (height - total_height) - ((height - total_height) * (30000 - currprefs.osd_pos.y) / 1000);
 	} else {
 		if (currprefs.osd_pos.y >= 0)
-			*y = height - TD_TOTAL_HEIGHT - currprefs.osd_pos.y;
+			*y = height - total_height - currprefs.osd_pos.y;
 		else
 			*y = -currprefs.osd_pos.y + 1;
 	}
 }
 
-static const char *numbers = { /* ugly  0123456789CHD%+-P */
-	"+++++++--++++-+++++++++++++++++-++++++++++++++++++++++++++++++++++++++++++++-++++++-++++----++---+--------------+++++++"
-	"+xxxxx+--+xx+-+xxxxx++xxxxx++x+-+x++xxxxx++xxxxx++xxxxx++xxxxx++xxxxx++xxxx+-+x++x+-+xxx++-+xx+-+x---+----------+xxxxx+"
-	"+x+++x+--++x+-+++++x++++++x++x+++x++x++++++x++++++++++x++x+++x++x+++x++x++++-+x++x+-+x++x+--+x++x+--+x+----+++--+x---x+"
-	"+x+-+x+---+x+-+xxxxx++xxxxx++xxxxx++xxxxx++xxxxx+--++x+-+xxxxx++xxxxx++x+----+xxxx+-+x++x+----+x+--+xxx+--+xxx+-+xxxxx+"
-	"+x+++x+---+x+-+x++++++++++x++++++x++++++x++x+++x+--+x+--+x+++x++++++x++x++++-+x++x+-+x++x+---+x+x+--+x+----+++--+x+++++"
-	"+xxxxx+---+x+-+xxxxx++xxxxx+----+x++xxxxx++xxxxx+--+x+--+xxxxx++xxxxx++xxxx+-+x++x+-+xxx+---+x++xx--------------+x+----"
-	"+++++++---+++-++++++++++++++----+++++++++++++++++--+++--++++++++++++++++++++-++++++-++++------------------------+++----"
+static const char *numbers = { /* ugly  0123456789CHD%+-PNK */
+	"+++++++--++++-+++++++++++++++++-++++++++++++++++++++++++++++++++++++++++++++-++++++-++++----++---+--------------+++++++++++++++++++++"
+	"+xxxxx+--+xx+-+xxxxx++xxxxx++x+-+x++xxxxx++xxxxx++xxxxx++xxxxx++xxxxx++xxxx+-+x++x+-+xxx++-+xx+-+x---+----------+xxxxx++x+++x++x++x++"
+	"+x+++x+--++x+-+++++x++++++x++x+++x++x++++++x++++++++++x++x+++x++x+++x++x++++-+x++x+-+x++x+--+x++x+--+x+----+++--+x---x++xx++x++x+x+++"
+	"+x+-+x+---+x+-+xxxxx++xxxxx++xxxxx++xxxxx++xxxxx+--++x+-+xxxxx++xxxxx++x+----+xxxx+-+x++x+----+x+--+xxx+--+xxx+-+xxxxx++x+x+x++xx++++"
+	"+x+++x+---+x+-+x++++++++++x++++++x++++++x++x+++x+--+x+--+x+++x++++++x++x++++-+x++x+-+x++x+---+x+x+--+x+----+++--+x++++++x+x+x++x+x+++"
+	"+xxxxx+---+x+-+xxxxx++xxxxx+----+x++xxxxx++xxxxx+--+x+--+xxxxx++xxxxx++xxxx+-+x++x+-+xxx+---+x++xx--------------+x+----+x++xx++x++x++"
+	"+++++++---+++-++++++++++++++----+++++++++++++++++--+++--++++++++++++++++++++-++++++-++++------------------------+++----++++++++++++++"
 };
 
-STATIC_INLINE uae_u32 ledcolor (uae_u32 c, uae_u32 *rc, uae_u32 *gc, uae_u32 *bc, uae_u32 *a)
+STATIC_INLINE uae_u32 ledcolor(uae_u32 c, uae_u32 *rc, uae_u32 *gc, uae_u32 *bc, uae_u32 *a)
 {
 	uae_u32 v = rc[(c >> 16) & 0xff] | gc[(c >> 8) & 0xff] | bc[(c >> 0) & 0xff];
 	if (a)
@@ -62,7 +64,7 @@ STATIC_INLINE uae_u32 ledcolor (uae_u32 c, uae_u32 *rc, uae_u32 *gc, uae_u32 *bc
 	return v;
 }
 
-static void write_tdnumber (uae_u8 *buf, int bpp, int x, int y, int num, uae_u32 c1, uae_u32 c2)
+static void write_tdnumber(uae_u8 *buf, int bpp, int x, int y, int num, uae_u32 c1, uae_u32 c2)
 {
 	int j;
 	const char *numptr;
@@ -70,21 +72,33 @@ static void write_tdnumber (uae_u8 *buf, int bpp, int x, int y, int num, uae_u32
 	numptr = numbers + num * TD_NUM_WIDTH + NUMBERS_NUM * TD_NUM_WIDTH * y;
 	for (j = 0; j < TD_NUM_WIDTH; j++) {
 		if (*numptr == 'x')
-			putpixel (buf, bpp, x + j, c1, 1);
+			putpixel (buf, NULL, bpp, x + j, c1, 1);
 		else if (*numptr == '+')
-			putpixel (buf, bpp, x + j, c2, 0);
+			putpixel (buf, NULL, bpp, x + j, c2, 0);
 		numptr++;
 	}
 }
 
-void draw_status_line_single (uae_u8 *buf, int bpp, int y, int totalwidth, uae_u32 *rc, uae_u32 *gc, uae_u32 *bc, uae_u32 *alpha)
+static uae_u32 rgbmuldiv(uae_u32 rgb, int mul, int div)
 {
+	uae_u32 out = 0;
+	for (int i = 0; i < 3; i++) {
+		int v = (rgb >> (i * 8)) & 0xff;
+		v *= mul;
+		v /= div;
+		out |= v << (i * 8);
+	}
+	return out;
+}
+
+void draw_status_line_single(int monid, uae_u8 *buf, int bpp, int y, int totalwidth, uae_u32 *rc, uae_u32 *gc, uae_u32 *bc, uae_u32 *alpha)
+{
+	struct amigadisplay *ad = &adisplays[monid];
 	int x_start, j, led, border;
 	uae_u32 c1, c2, cb;
 
 	c1 = ledcolor (0x00ffffff, rc, gc, bc, alpha);
 	c2 = ledcolor (0x00000000, rc, gc, bc, alpha);
-	cb = ledcolor (TD_BORDER, rc, gc, bc, alpha);
 
 	if (td_pos & TD_RIGHT)
 		x_start = totalwidth - TD_PADX - VISIBLE_LEDS * TD_WIDTH;
@@ -96,32 +110,38 @@ void draw_status_line_single (uae_u8 *buf, int bpp, int y, int totalwidth, uae_u
 		int x, c, on = 0, am = 2;
 		xcolnr on_rgb = 0, on_rgb2 = 0, off_rgb = 0, pen_rgb = 0;
 		int half = 0;
+		cb = ledcolor(TD_BORDER, rc, gc, bc, alpha);
 
-		if (!(currprefs.leds_on_screen_mask[picasso_on ? 1 : 0] & (1 << led)))
+		if (!(currprefs.leds_on_screen_mask[ad->picasso_on ? 1 : 0] & (1 << led)))
 			continue;
 
 		pen_rgb = c1;
 		if (led >= LED_DF0 && led <= LED_DF3) {
 			int pled = led - LED_DF0;
-			int track = gui_data.drive_track[pled];
-			pos = 6 + pled;
+			struct floppyslot *fs = &currprefs.floppyslots[pled];
+			struct gui_info_drive *gid = &gui_data.drives[pled];
+			int track = gid->drive_track;
+			pos = 7 + pled;
 			on_rgb = 0x00cc00;
-			on_rgb2 = 0x006600;
-			off_rgb = 0x003300;
-			if (!gui_data.drive_disabled[pled]) {
+			if (!gid->drive_disabled) {
 				num1 = -1;
 				num2 = track / 10;
 				num3 = track % 10;
-				on = gui_data.drive_motor[pled];
-				if (gui_data.drive_writing[pled]) {
+				on = gid->drive_motor;
+				if (gid->drive_writing) {
 					on_rgb = 0xcc0000;
-					on_rgb2 = 0x880000;
 				}
 				half = gui_data.drive_side ? 1 : -1;
-				if (gui_data.df[pled][0] == 0)
-					pen_rgb = ledcolor (0x00aaaaaa, rc, gc, bc, alpha);
+				if (gid->df[0] == 0) {
+					pen_rgb = ledcolor(0x00aaaaaa, rc, gc, bc, alpha);
+				} else if (gid->floppy_protected) {
+					cb = ledcolor(0xff8040, rc, gc, bc, alpha);
+				}
 			}
 			side = gui_data.drive_side;
+			on_rgb &= 0xffffff;
+			off_rgb = rgbmuldiv(on_rgb, 2, 4);
+			on_rgb2 = rgbmuldiv(on_rgb, 2, 3);
 		} else if (led == LED_POWER) {
 			pos = 3;
 			on_rgb = ((gui_data.powerled_brightness * 10 / 16) + 0x33) << 16;
@@ -152,18 +172,35 @@ void draw_status_line_single (uae_u8 *buf, int bpp, int y, int totalwidth, uae_u
 				num3 = 12;
 			}
 		} else if (led == LED_FPS) {
-			int fps = (gui_data.fps + 5) / 10;
 			pos = 2;
-			on_rgb = 0x000000;
-			off_rgb = gui_data.fps_color ? 0xcccc00 : 0x000000;
-			if (fps > 999)
-				fps = 999;
-			num1 = fps / 100;
-			num2 = (fps - num1 * 100) / 10;
-			num3 = fps % 10;
-			am = 3;
-			if (num1 == 0)
+			if (pause_emulation) {
+				num1 = -1;
+				num2 = -1;
+				num3 = 16;
+				on_rgb = 0xcccccc;
+				off_rgb = 0x000000;
 				am = 2;
+			} else {
+				int fps = (gui_data.fps + 5) / 10;
+				on_rgb = 0x000000;
+				off_rgb = gui_data.fps_color ? 0xcccc00 : 0x000000;
+				am = 3;
+				if (fps > 999) {
+					fps += 50;
+					fps /= 10;
+					if (fps > 999)
+						fps = 999;
+					num1 = fps / 100;
+					num2 = 18;
+					num3 = (fps - num1 * 100) / 10;
+				} else {
+					num1 = fps / 100;
+					num2 = (fps - num1 * 100) / 10;
+					num3 = fps % 10;
+					if (num1 == 0)
+						am = 2;
+				}
+			}
 		} else if (led == LED_CPU) {
 			int idle = (gui_data.idle + 5) / 10;
 			pos = 1;
@@ -180,9 +217,9 @@ void draw_status_line_single (uae_u8 *buf, int bpp, int y, int totalwidth, uae_u
 					am = 3;
 				} else {
 					on_rgb = 0xcccc00;
-					num1 = -1;
-					num2 = 11;
-					num3 = gui_data.cpu_halted;
+					num1 = gui_data.cpu_halted >= 10 ? 11 : -1;
+					num2 = gui_data.cpu_halted >= 10 ? gui_data.cpu_halted / 10 : 11;
+					num3 = gui_data.cpu_halted % 10;
 					am = 2;
 				}
 			} else {
@@ -192,7 +229,7 @@ void draw_status_line_single (uae_u8 *buf, int bpp, int y, int totalwidth, uae_u
 				num4 = num1 == 0 ? 13 : -1;
 				am = 3;
 			}
-		} else if (led == LED_SND) {
+		} else if (led == LED_SND && gui_data.sndbuf_avail) {
 			int snd = abs(gui_data.sndbuf + 5) / 10;
 			if (snd > 99)
 				snd = 99;
@@ -212,9 +249,9 @@ void draw_status_line_single (uae_u8 *buf, int bpp, int y, int totalwidth, uae_u
 				on_rgb = 0x0000cc; // "normal" overflow
 			off_rgb = 0x000000;
 			am = 3;
-		} else if (led == LED_MD && gui_data.drive_disabled[3]) {
+		} else if (led == LED_MD && gui_data.drives[3].drive_disabled) {
 			// DF3 reused as internal non-volatile ram led (cd32/cdtv)
-			pos = 6 + 3;
+			pos = 7 + 3;
 			if (gui_data.md >= 0) {
 				on = gui_data.md;
 				on_rgb = on == 2 ? 0xcc0000 : 0x00cc00;
@@ -223,8 +260,24 @@ void draw_status_line_single (uae_u8 *buf, int bpp, int y, int totalwidth, uae_u
 			num1 = -1;
 			num2 = -1;
 			num3 = -1;
-		} else
-			return;
+		} else if (led == LED_NET) {
+			pos = 6;
+			if (gui_data.net >= 0) {
+				on = gui_data.net;
+				on_rgb = 0;
+				if (on & 1)
+					on_rgb |= 0x00cc00;
+				if (on & 2)
+					on_rgb |= 0xcc0000;
+				off_rgb = 0x000000;
+				num1 = -1;
+				num2 = -1;
+				num3 = 17;
+				am = 1;
+			}
+		} else {
+			continue;
+		}
 		on_rgb |= 0x33000000;
 		off_rgb |= 0x33000000;
 		if (half > 0) {
@@ -236,17 +289,17 @@ void draw_status_line_single (uae_u8 *buf, int bpp, int y, int totalwidth, uae_u
 		}
 		border = 0;
 		if (y == 0 || y == TD_TOTAL_HEIGHT - 1) {
-			c = ledcolor (TD_BORDER, rc, gc, bc, alpha);
+			c = cb;
 			border = 1;
 		}
 
 		x = x_start + pos * TD_WIDTH;
 		if (!border)
-			putpixel (buf, bpp, x - 1, cb, 0);
+			putpixel (buf, NULL, bpp, x - 1, cb, 0);
 		for (j = 0; j < TD_LED_WIDTH; j++)
-			putpixel (buf, bpp, x + j, c, 0);
+			putpixel (buf, NULL, bpp, x + j, c, 0);
 		if (!border)
-			putpixel (buf, bpp, x + j, cb, 0);
+			putpixel (buf, NULL, bpp, x + j, cb, 0);
 
 		if (y >= TD_PADY && y - TD_PADY < TD_NUM_HEIGHT) {
 			if (num3 >= 0) {
@@ -269,7 +322,12 @@ void draw_status_line_single (uae_u8 *buf, int bpp, int y, int totalwidth, uae_u
 }
 
 #define MAX_STATUSLINE_QUEUE 8
-static TCHAR *statusline_text[MAX_STATUSLINE_QUEUE];
+struct statusline_struct
+{
+	TCHAR *text;
+	int type;
+};
+struct statusline_struct statusline_data[MAX_STATUSLINE_QUEUE];
 static TCHAR *statusline_text_active;
 static int statusline_delay;
 static bool statusline_had_changed;
@@ -284,7 +342,7 @@ bool has_statusline_updated(void)
 static void statusline_update_notification(void)
 {
 	statusline_had_changed = true;
-	statusline_updated();
+	statusline_updated(0);
 }
 
 void statusline_clear(void)
@@ -292,8 +350,8 @@ void statusline_clear(void)
 	statusline_text_active = NULL;
 	statusline_delay = 0;
 	for (int i = 0; i < MAX_STATUSLINE_QUEUE; i++) {
-		xfree(statusline_text[i]);
-		statusline_text[i] = NULL;
+		xfree(statusline_data[i].text);
+		statusline_data[i].text = NULL;
 	}
 	statusline_update_notification();
 }
@@ -303,7 +361,7 @@ const TCHAR *statusline_fetch(void)
 	return statusline_text_active;
 }
 
-void statusline_add_message(const TCHAR *format, ...)
+void statusline_add_message(int statustype, const TCHAR *format, ...)
 {
 	va_list parms;
 	TCHAR buffer[256];
@@ -316,67 +374,81 @@ void statusline_add_message(const TCHAR *format, ...)
 	_vsntprintf(buffer + 1, 256 - 2, format, parms);
 	_tcscat(buffer, _T(" "));
 
-	if (statusline_text[1]) {
+	for (int i = 0; i < MAX_STATUSLINE_QUEUE; i++) {
+		if (statusline_data[i].text != NULL && statusline_data[i].type == statustype) {
+			xfree(statusline_data[i].text);
+			statusline_data[i].text = NULL;
+			for (int j = i + 1; j < MAX_STATUSLINE_QUEUE; j++) {
+				memcpy(&statusline_data[j - 1], &statusline_data[j], sizeof(struct statusline_struct));
+			}
+			statusline_data[MAX_STATUSLINE_QUEUE - 1].text = NULL;
+		}
+	}
+
+	if (statusline_data[1].text) {
 		for (int i = 0; i < MAX_STATUSLINE_QUEUE; i++) {
-			if (statusline_text[i] && !_tcscmp(statusline_text[i], buffer)) {
-				xfree(statusline_text[i]);
+			if (statusline_data[i].text && !_tcscmp(statusline_data[i].text, buffer)) {
+				xfree(statusline_data[i].text);
 				for (int j = i + 1; j < MAX_STATUSLINE_QUEUE; j++) {
-					statusline_text[j - 1] = statusline_text[j];
+					memcpy(&statusline_data[j - 1], &statusline_data[j], sizeof(struct statusline_struct));
 				}
-				statusline_text[MAX_STATUSLINE_QUEUE - 1] = NULL;
+				statusline_data[MAX_STATUSLINE_QUEUE - 1].text = NULL;
 				i = 0;
 			}
 		}
-	} else if (statusline_text[0]) {
-		if (!_tcscmp(statusline_text[0], buffer))
+	} else if (statusline_data[0].text) {
+		if (!_tcscmp(statusline_data[0].text, buffer))
 			return;
 	}
 
 	for (int i = 0; i < MAX_STATUSLINE_QUEUE; i++) {
-		if (statusline_text[i] == NULL) {
-			statusline_text[i] = my_strdup(buffer);
+		if (statusline_data[i].text == NULL) {
+			statusline_data[i].text = my_strdup(buffer);
+			statusline_data[i].type = statustype;
 			if (i == 0)
 				statusline_delay = STATUSLINE_MS * vblank_hz / (1000 * 1);
-			statusline_text_active = statusline_text[0];
+			statusline_text_active = statusline_data[0].text;
 			statusline_update_notification();
 			return;
 		}
 	}
 	statusline_text_active = NULL;
-	xfree(statusline_text[0]);
+	xfree(statusline_data[0].text);
 	for (int i = 1; i < MAX_STATUSLINE_QUEUE; i++) {
-		statusline_text[i - 1] = statusline_text[i];
+		memcpy(&statusline_data[i - 1], &statusline_data[i], sizeof(struct statusline_struct));
 	}
-	statusline_text[MAX_STATUSLINE_QUEUE - 1] = my_strdup(buffer);
-	statusline_text_active = statusline_text[0];
+	statusline_data[MAX_STATUSLINE_QUEUE - 1].text = my_strdup(buffer);
+	statusline_data[MAX_STATUSLINE_QUEUE - 1].type = statustype;
+	statusline_text_active = statusline_data[0].text;
 	statusline_update_notification();
+
 	va_end(parms);
 }
 
 void statusline_vsync(void)
 {
-	if (!statusline_text[0])
+	if (!statusline_data[0].text)
 		return;
 	if (statusline_delay == 0)
 		statusline_delay = STATUSLINE_MS * vblank_hz / (1000 * 1);
 	if (statusline_delay > STATUSLINE_MS * vblank_hz / (1000 * 1))
 		statusline_delay = STATUSLINE_MS * vblank_hz / (1000 * 1);
-	if (statusline_delay > STATUSLINE_MS * vblank_hz / (1000 * 3) && statusline_text[1])
+	if (statusline_delay > STATUSLINE_MS * vblank_hz / (1000 * 3) && statusline_data[1].text)
 		statusline_delay = STATUSLINE_MS * vblank_hz / (1000 * 3);
 	statusline_delay--;
 	if (statusline_delay)
 		return;
 	statusline_text_active = NULL;
-	xfree(statusline_text[0]);
+	xfree(statusline_data[0].text);
 	for (int i = 1; i < MAX_STATUSLINE_QUEUE; i++) {
-		statusline_text[i - 1] = statusline_text[i];
+		statusline_data[i - 1].text = statusline_data[i].text;
 	}
-	statusline_text[MAX_STATUSLINE_QUEUE - 1] = NULL;
-	statusline_text_active = statusline_text[0];
+	statusline_data[MAX_STATUSLINE_QUEUE - 1].text = NULL;
+	statusline_text_active = statusline_data[0].text;
 	statusline_update_notification();
 }
 
-void statusline_single_erase(uae_u8 *buf, int bpp, int y, int totalwidth)
+void statusline_single_erase(int monid, uae_u8 *buf, int bpp, int y, int totalwidth)
 {
 	memset(buf, 0, bpp * totalwidth);
 }

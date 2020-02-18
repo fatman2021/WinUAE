@@ -55,7 +55,9 @@ void ip_init(void)
 	ip_id = tt.tv_sec & 0xffff;
 	udp_init();
 	tcp_init();
+#if SLIRP_ICMP
 	icmp_init();
+#endif
 	ip_defttl = IPDEFTTL;
 }
 
@@ -63,7 +65,9 @@ void ip_cleanup(void)
 {
     udp_cleanup();
     tcp_cleanup();
+#if SLIRP_ICMP
     icmp_cleanup();
+#endif
 }
 
 /*
@@ -73,11 +77,11 @@ void ip_cleanup(void)
 void ip_input(struct mbuf *m)
 {
 	struct ip *ip;
-	int hlen;
+	u_int hlen;
 	
 	DEBUG_CALL("ip_input");
-	DEBUG_ARG("m = %lx", (long)m);
-	DEBUG_ARG("m_len = %d", m->m_len);
+	DEBUG_ARG("m = %p", m);
+	DEBUG_ARG("m_len = %zu", m->m_len);
 
 	ipstat.ips_total++;
 	
@@ -249,9 +253,9 @@ struct ip *ip_reass(struct ip *ip, struct ipq *fp)
 	int i, next;
 	
 	DEBUG_CALL("ip_reass");
-	DEBUG_ARG("ip = %lx", (long)ip);
-	DEBUG_ARG("fp = %lx", (long)fp);
-	DEBUG_ARG("m = %lx", (long)m);
+	DEBUG_ARG("ip = %p", ip);
+	DEBUG_ARG("fp = %p", fp);
+	DEBUG_ARG("m = %p", m);
 
 	/*
 	 * Presence of header sizes in mbufs
@@ -367,7 +371,7 @@ insert:
 	 */
 	if (m->m_flags & M_EXT) {
 	  int delta;
-	  delta = (char *)ip - m->m_dat;
+	  delta = (char *)q - m->m_dat;
 	  q = (struct ipasfrag *)(m->m_ext + delta);
 	}
 
@@ -416,7 +420,7 @@ void ip_freef(struct ipq *fp)
 void ip_enq(struct ipasfrag *p, struct ipasfrag *prev)
 {
 	DEBUG_CALL("ip_enq");
-	DEBUG_ARG("prev = %lx", (long)prev);
+	DEBUG_ARG("prev = %p", prev);
 	p->ipf_prev =  prev;
 	p->ipf_next = prev->ipf_next;
 	((struct ipasfrag *)(prev->ipf_next))->ipf_prev = p;

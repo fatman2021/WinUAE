@@ -4,6 +4,7 @@
 #include "rtgmodes.h"
 #include <ddraw.h>
 #include <d3d9.h>
+#include <D3dkmthk.h>
 
 #define MAX_DISPLAYS 10
 
@@ -72,13 +73,73 @@ struct PicassoResolution
 struct MultiDisplay {
 	bool primary;
 	GUID ddguid;
+	HMONITOR monitor;
 	TCHAR *adaptername, *adapterid, *adapterkey;
 	TCHAR *monitorname, *monitorid;
 	TCHAR *fullname;
 	struct PicassoResolution *DisplayModes;
 	RECT rect;
+	RECT workrect;
+	LUID AdapterLuid;
+	UINT VidPnSourceId;
+	UINT AdapterHandle;
+	bool HasAdapterData;
 };
 extern struct MultiDisplay Displays[MAX_DISPLAYS + 1];
+
+extern int amigamonid;
+
+struct winuae_currentmode {
+	unsigned int flags;
+	int native_width, native_height, native_depth, pitch;
+	int current_width, current_height, current_depth;
+	int amiga_width, amiga_height;
+	int initdone;
+	int fullfill;
+	int vsync;
+	int freq;
+};
+
+#define MAX_AMIGAMONITORS 4
+struct AmigaMonitor {
+	int monitor_id;
+	HWND hAmigaWnd;
+	HWND hMainWnd;
+	struct MultiDisplay *md;
+
+	RECT amigawin_rect, mainwin_rect;
+	RECT amigawinclip_rect;
+	int window_extra_width, window_extra_height;
+	int win_x_diff, win_y_diff;
+	int setcursoroffset_x, setcursoroffset_y;
+	int mouseposx, mouseposy;
+	int windowmouse_max_w;
+	int windowmouse_max_h;
+	int ratio_width, ratio_height;
+	int ratio_adjust_x, ratio_adjust_y;
+	bool ratio_sizing;
+	int prevsbheight;
+	bool render_ok, wait_render;
+
+	int in_sizemove;
+	int manual_painting_needed;
+	int minimized;
+	int screen_is_picasso;
+	int screen_is_initialized;
+	int scalepicasso;
+	bool rtg_locked;
+	int p96_double_buffer_firstx, p96_double_buffer_lastx;
+	int p96_double_buffer_first, p96_double_buffer_last;
+	int p96_double_buffer_needs_flushing;
+
+	HWND hStatusWnd;
+	HBRUSH hStatusBkgB;
+
+	struct winuae_currentmode currentmode;
+	struct uae_filter *usedfilter;
+};
+extern struct AmigaMonitor *amon;
+extern struct AmigaMonitor AMonitors[MAX_AMIGAMONITORS];
 
 typedef enum
 {
@@ -144,4 +205,3 @@ int dx_islost (void);
 #define DDFORCED_SYSMEM 3
 
 #endif
-

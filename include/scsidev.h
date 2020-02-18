@@ -8,7 +8,12 @@
   * (c) 2001-2005 Toni Wilen
   */
 
-uaecptr scsidev_startup (uaecptr resaddr);
+#ifndef UAE_SCSIDEV_H
+#define UAE_SCSIDEV_H
+
+#include "uae/types.h"
+
+uaecptr scsidev_startup(TrapContext*, uaecptr resaddr);
 void scsidev_install (void);
 void scsidev_reset (void);
 void scsidev_start_threads (void);
@@ -26,3 +31,5 @@ extern int log_scsi;
 #define UAESCSI_SPTISCAN 2
 #define UAESCSI_LAST 2
 #endif
+
+#endif /* UAE_SCSIDEV_H */

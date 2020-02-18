@@ -1,5 +1,5 @@
-
-
+#include "uae/inline.h"
+#include "uae/likely.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -18,14 +18,6 @@ extern void write_log (const char *, ...);
 #define tostring(s)	#s
 #endif
 
-#ifndef likely
-#if __GNUC__ < 3
-#define __builtin_expect(x, n) (x)
-#endif
-#define likely(x)   __builtin_expect(!!(x), 1)
-#define unlikely(x)   __builtin_expect(!!(x), 0)
-#endif
-
 typedef int ssize_t;
 
 #ifdef _MSC_VER
@@ -33,7 +25,6 @@ typedef int ssize_t;
 #define container_of(address, type, field) ((type *)( \
         (PCHAR)(address) - \
         (ULONG_PTR)(&((type *)0)->field)))
-#define STATIC_INLINE static __forceinline
 
 #define snprintf c99_snprintf
 inline int c99_vsnprintf(char* str, size_t size, const char* format, va_list ap)
@@ -72,9 +63,13 @@ inline int c99_snprintf(char* str, size_t size, const char* format, ...)
 #define ABS(x) abs(x)
 #endif
 
+#ifdef USE_GLIB
+#include <glib.h>
+#else
 #define g_free free
 #define g_malloc malloc
 #define g_new(type, num) ((type*)calloc(sizeof(type),num))
+#endif
 
 enum device_endian {
     DEVICE_NATIVE_ENDIAN,
@@ -95,7 +90,7 @@ int64_t get_ticks_per_sec(void);
 
 #define isa_mem_base 0
 
-#define QemuConsole uint32_t
+#define QemuConsole void
 #define console_ch_t uint8_t
 typedef struct GraphicHwOps {
     void (*invalidate)(void *opaque);
@@ -109,7 +104,7 @@ typedef struct GraphicHwOps {
 #define ram_addr_t uint32_t
 
 typedef struct DisplaySurface {
-	void *bah;
+	void *data;
 } DisplaySurface;
 
 uint16_t le16_to_cpu(uint16_t v);
@@ -138,6 +133,7 @@ STATIC_INLINE int ldl_le_p(const void *ptr)
 }
 STATIC_INLINE void cpu_to_32wu(uint32_t *p, uint32_t v)
 {
+	stl_le_p(p, v);
 }
 
 void graphic_hw_update(QemuConsole *con);
@@ -238,6 +234,7 @@ void qemu_register_reset(QEMUResetHandler *func, void *opaque);
 #define CIRRUS_ID_CLGD5426  (0x24<<2)
 #define CIRRUS_ID_CLGD5424  (0x25<<2)
 #define CIRRUS_ID_CLGD5428  (0x26<<2)
+#define CIRRUS_ID_CLGD5429  (0x27<<2)
 #define CIRRUS_ID_CLGD5430  (0x28<<2)
 #define CIRRUS_ID_CLGD5434  (0x2A<<2)
 #define CIRRUS_ID_CLGD5436  (0x2B<<2)
@@ -246,11 +243,13 @@ void qemu_register_reset(QEMUResetHandler *func, void *opaque);
 typedef struct CirrusVGAState CirrusVGAState;
 
 typedef void (*cirrus_bitblt_rop_t) (CirrusVGAState *s,
-					 uint8_t * dst, const uint8_t * src,
-				     int dstpitch, int srcpitch,
-				     int bltwidth, int bltheight);
+					uint8_t *dst, uint32_t dstaddr, uint32_t dstmask,
+					const uint8_t *src, uint32_t srcaddr, uint32_t srcmask,
+				    int dstpitch, int srcpitch,
+				    int bltwidth, int bltheight);
 typedef void (*cirrus_fill_t)(CirrusVGAState *s,
-                              uint8_t *dst, int dst_pitch, int width, int height);
+					uint8_t *dst, uint32_t dstaddr, uint32_t dstmask,
+					int dst_pitch, int width, int height);
 
 struct CirrusVGAState {
     VGACommonState vga;
@@ -303,11 +302,12 @@ struct CirrusVGAState {
     int device_id;
     int bustype;
 	int valid_memory_config;
+	bool x86vga;
 };
 
 void cirrus_init_common(CirrusVGAState * s, int device_id, int is_pci,
                                MemoryRegion *system_memory,
-                               MemoryRegion *system_io);
+                               MemoryRegion *system_io, int vramlimit, bool x86vga);
 
 struct DeviceState
 {

@@ -70,7 +70,7 @@ int my_mkdir (const TCHAR *name)
 	return CreateDirectory (namep, NULL) == 0 ? -1 : 0;
 }
 
-static int recycle (const TCHAR *name)
+static int recycle (const TCHAR *name, bool dontrecycle)
 {
 	DWORD dirattr = GetFileAttributesSafe (name);
 	bool isdir = dirattr != INVALID_FILE_ATTRIBUTES && (dirattr & FILE_ATTRIBUTE_DIRECTORY);
@@ -85,7 +85,7 @@ static int recycle (const TCHAR *name)
 		namep = name;
 	}
 
-	if (currprefs.win32_norecyclebin || isdir || currprefs.win32_filesystem_mangle_reserved_names == false) {
+	if (dontrecycle || currprefs.win32_norecyclebin || isdir || currprefs.win32_filesystem_mangle_reserved_names == false) {
 		if (isdir)
 			return RemoveDirectory (namep) ? 0 : -1;
 		else
@@ -162,13 +162,13 @@ int my_rmdir (const TCHAR *name)
 		return -1;
 	}
 
-	return recycle (name);
+	return recycle (name, false);
 }
 
 /* "move to Recycle Bin" (if enabled) -version of DeleteFile() */
-int my_unlink (const TCHAR *name)
+int my_unlink (const TCHAR *name, bool dontrecycle)
 {
-	return recycle (name);
+	return recycle (name, dontrecycle);
 }
 
 int my_rename (const TCHAR *oldname, const TCHAR *newname)
@@ -385,7 +385,7 @@ struct my_openfile_s *my_open (const TCHAR *name, int flags)
 		CreationDisposition = OPEN_ALWAYS;
 	if (flags & O_WRONLY)
 		DesiredAccess = GENERIC_WRITE;
-	if (flags & O_RDONLY) {
+	if (flags == O_RDONLY) {
 		DesiredAccess = GENERIC_READ;
 		CreationDisposition = OPEN_EXISTING;
 	}
@@ -524,7 +524,7 @@ int my_getvolumeinfo (const TCHAR *root)
 	if (v & FILE_ATTRIBUTE_READONLY)
 	ret |= MYVOLUMEINFO_READONLY;
 	*/
-	if (GetVolumePathName (root, volume, sizeof (volume))) {
+	if (GetVolumePathName (root, volume, sizeof (volume) / sizeof(TCHAR))) {
 		TCHAR fsname[MAX_DPATH];
 		DWORD comlen;
 		DWORD flags;
@@ -546,7 +546,7 @@ FILE *my_opentext (const TCHAR *name)
 	f = _tfopen (name, _T("rb"));
 	if (!f)
 		return NULL;
-	v = fread (tmp, 1, 4, f);
+	v = fread (tmp, 1, sizeof tmp, f);
 	fclose (f);
 	if (v == 4) {
 		if (tmp[0] == 0xef && tmp[1] == 0xbb && tmp[2] == 0xbf)
@@ -632,7 +632,7 @@ bool my_stat (const TCHAR *name, struct mystat *statbuf)
 			if (wtsec == ctsec || wtsec + 1 == ctsec) {
 				ft = fi.ftCreationTime;
 			} else {
-				ft = fi.ftLastAccessTime;
+				ft = fi.ftLastWriteTime;
 			}
 		} else {
 			ft = fi.ftLastWriteTime;
@@ -701,7 +701,7 @@ static int setfiletime (const TCHAR *name, int days, int minute, int tick, int t
 		namep = name;
 	}
 
-	if ((hFile = CreateFile (namep, GENERIC_WRITE,FILE_SHARE_READ | FILE_SHARE_WRITE,NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL)) == INVALID_HANDLE_VALUE)
+	if ((hFile = CreateFile(namep, FILE_WRITE_ATTRIBUTES, FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL)) == INVALID_HANDLE_VALUE)
 		return 0;
 
 	for (;;) {
@@ -780,7 +780,13 @@ void my_canonicalize_path(const TCHAR *path, TCHAR *out, int size)
 
 	// don't attempt to validate and canonicalize invalid or fake paths
 	if (path[0] == ':' || path[0] == 0 || _tcscmp(path, _T("\\")) == 0 || _tcscmp(path, _T("/")) == 0) {
-		_tcsncpy (out, path, size);
+		_tcsncpy(out, path, size);
+		out[size - 1] = 0;
+		return;
+	}
+	// skip network paths, prevent common few seconds delay.
+	if (path[0] == '\\' && path[1] == '\\') {
+		_tcsncpy(out, path, size);
 		out[size - 1] = 0;
 		return;
 	}
@@ -904,8 +910,8 @@ bool my_resolveshortcut(TCHAR *linkfile, int size)
 	bool ok = false;
     HRESULT hres; 
     IShellLink* psl; 
-    WCHAR szGotPath[MAX_PATH]; 
-    WCHAR szDescription[MAX_PATH]; 
+    WCHAR szGotPath[MAX_DPATH]; 
+    WCHAR szDescription[MAX_DPATH]; 
     WIN32_FIND_DATA wfd; 
  
 	const TCHAR *ext = _tcsrchr (linkfile, '.');
@@ -938,12 +944,12 @@ bool my_resolveshortcut(TCHAR *linkfile, int size)
                 if (SUCCEEDED(hres)) 
                 { 
                     // Get the path to the link target. 
-                    hres = psl->GetPath(szGotPath, MAX_PATH, (WIN32_FIND_DATA*)&wfd, SLGP_SHORTPATH); 
+                    hres = psl->GetPath(szGotPath, MAX_DPATH, &wfd, SLGP_SHORTPATH);
 
                     if (SUCCEEDED(hres)) 
                     { 
                         // Get the description of the target. 
-                        hres = psl->GetDescription(szDescription, MAX_PATH); 
+                        hres = psl->GetDescription(szDescription, MAX_DPATH);
 
                         if (SUCCEEDED(hres)) 
                         {
@@ -1003,21 +1009,17 @@ bool my_createshortcut(const TCHAR *source, const TCHAR *target, const TCHAR *de
 }
 
 
-bool my_resolvesoftlink(TCHAR *linkfile, int size)
+bool my_resolvesoftlink(TCHAR *linkfile, int size, bool linkonly)
 {
-	TCHAR tmp[MAX_DPATH];
-
-	int v = my_resolvessymboliclink2(linkfile, size);
-	if (v > 0)
-		return true;
-	if (v == 0)
-		return false;
+	if (!linkonly) {
+		int v = my_resolvessymboliclink2(linkfile, size);
+		if (v > 0)
+			return true;
+		if (v == 0)
+			return false;
+	}
 	if (my_resolveshortcut(linkfile,size))
 		return true;
-	if (size > 0) {
-		_tcscpy (tmp, linkfile);
-		my_canonicalize_path (tmp, linkfile, size);
-	}
 	return false;
 }
 
@@ -1033,3 +1035,4 @@ const TCHAR *my_getfilepart(const TCHAR *filename)
 		return p + 1;
 	return filename;
 }
+
